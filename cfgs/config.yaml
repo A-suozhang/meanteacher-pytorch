@@ -1,0 +1,9 @@
+labeledbatchsize: 128
+batchsize: 256
+opt: "sgd"
+lr: 1.e-1
+epoch: 10
+th: 0.75
+ratio: 0.3
+warmup_epochs: 5
+
