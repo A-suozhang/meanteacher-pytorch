@@ -1,478 +1,145 @@
+"""train cifar10 with pytorch."""
+from __future__ import print_function
 
-import re
-import argparse
 import os
+import sys
+import random
 import shutil
-import time
-import math
+import argparse
 import logging
+from time import *
+
 import yaml
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.optim as optim
+import torch.nn.functional as f
 import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
+import torchvision
 import torchvision.datasets
 import torchvision.transforms as transforms
 
-from tqdm import tqdm
-from tensorboardX import SummaryWriter
 
-from datasets import *
-from models.resnet32 import *
-from models.net import *
+import datasets
+import models
+from models import *
+from trainer import *
 from utils import *
-from optim import EMAWeightOptimizer
 
+def main(argv):
 
-# ---------- Make Arg --------------
-parser = argparse.ArgumentParser(description='PyTorch Cifar10 Semi-Supervised Training')
-parser.add_argument("cfg")
-parser.add_argument("--save",required=True,help="path 2 store logs/ckpt")
-parser.add_argument('--onlylabel', default=False, type=bool,
-                        help='exclude unlabeled examples from the training set')
-parser.add_argument('--gpu', default="m", 
-                    help="The GPU")
-parser.add_argument('--quan', default=False, type = bool,
-                    help="The Quantize In Training")
-parser.add_argument('--resume', default = '', type=str,
-                    help = 'the path to the checkpoint file')
-parser.add_argument("--seed",type=int,help="Name seed")
-parser.add_argument('--lrdecay', default = False,
-                    help = 'Whether Using Lr Decay')
-parser.add_argument('--numlabel', default=4000, type=int,
-                    help = 'Num Of Labels.')
-args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training", prog="main.py")
+    parser.add_argument("cfg", help="Available models: ")
+    parser.add_argument("--local_rank",default=-1,type=int,help="the rank of this process")
+    parser.add_argument("--gpu", default="0", help="gpu ids, seperate by comma")
+    parser.add_argument("--save",  required=True,
+                        help="store logs/checkpoints under this directory")
+    parser.add_argument("--resume", "-r", help="resume from checkpoint")
+    parser.add_argument("--pretrain", action="store_true",
+                        help="used with `--resume`, regard as a pretrain model, do not recover epoch/best_acc")
+    parser.add_argument("--no-cuda", action="store_true", default=False, help="do not use gpu")
+    parser.add_argument("--seed", default=None, help="random seed", type=int)
+    parser.add_argument("--save-every", default=20, type=int, help="save every N epoch")
+    parser.add_argument("--distributed", action="store_true",help="whether to use distributed training")
+    parser.add_argument("--dataset-path", default=None, help="dataset path")
+    args = parser.parse_args(argv)
 
-savepath = args.save
+    savepath = args.save
 
-default_cfg = {
-    "labeledbatchsize":128,
-    "batchsize":256,
-    "opt":"sgd",
-    "lr":5e-3,
-    "epoch":200,
-    "th":0.9,
-    "ratio":3.0,
-    "warmup_epochs":0
-}
-cfg = default_cfg
-
-# Create Save DIR
-if not os.path.isdir(savepath):
-    if sys.version_info.major == 2:
-        os.makedirs(savepath)
-    else:
-        os.makedirs(savepath, exist_ok=True)
-
-
-# Load and backup configuration file
-shutil.copyfile(args.cfg, os.path.join(savepath, "config.yaml"))
-with open(args.cfg) as cfg_f:
-    cfg = yaml.load(cfg_f)
-
-if (args.numlabel == 4000):
-    LABEL_DIR = 'data-local/labels/cifar10/4000_balanced_labels/00.txt'
-elif (args.numlabel == 1000):
-    LABEL_DIR = 'data-local/labels/cifar10/1000_balanced_labels/00.txt'
-else:
-    print("Please Choose The Supported Num Label")
-
-DATA_DIR = 'data-local/images/cifar/cifar10/by-image'
-BATCH_SIZE = cfg["batchsize"]
-LEARINING_RATE = cfg["lr"]
-AUG_LOSS_INDEX = cfg["ratio"]
-
-# Manual Seed
-if args.seed is not None:
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-# Set Up log
-log_format = "%(message)s"
-logging.basicConfig(
-    level=logging.INFO,
-    format=log_format,
-    filemode="w")
-
-file_handler = logging.FileHandler(os.path.join(savepath, "train.log"))
-file_handler.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(file_handler)
-logging.info("CMD: %s", " ".join(sys.argv))
-
-if (args.numlabel == 4000):
-    TEACHRE_ALPHA = 0.9921875
-elif(args.numlabel == 1000):
-    TEACHRE_ALPHA = 0.96875
-CONFIDENCE_THRESHOLD = cfg["th"]
-
-if(args.quan):
-    print("Detecting Using Qunatized Training,Note That The BITWIDTH is Defined In ./model/net.py")
-
-# ------- Prepare Data -----------
-
-channel_stats = dict(mean=[0.4914, 0.4822, 0.4465],
-                        std=[0.2470,  0.2435,  0.2616])
-
-train_transformation = TransformTwice(transforms.Compose([
-        RandomTranslateWithReflect(4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(**channel_stats)
-    ]))
-
-eval_transformation = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(**channel_stats)
-])
-
-traindir = os.path.join(DATA_DIR, 'train')
-evaldir = os.path.join(DATA_DIR, 'val')
-
-dataset = torchvision.datasets.ImageFolder(traindir, train_transformation)
-
-# Make Labels
-with open(LABEL_DIR) as f:
-        labels = dict(line.split(' ') for line in f.read().splitlines())
-        labeled_idxs, unlabeled_idxs = relabel_dataset(dataset, labels)
-
-if args.onlylabel:  # Only Train On Labeled Data
-    sampler = SubsetRandomSampler(labeled_idxs)
-    batch_sampler = BatchSampler(sampler, cfg["batchsize"], drop_last=True)
-elif cfg["labeledbatchsize"]:   # Train With Both  (Pack The DataSet)
-    batch_sampler = TwoStreamBatchSampler(
-        unlabeled_idxs, labeled_idxs, cfg["batchsize"], cfg["labeledbatchsize"])
-else:
-    assert False, "labeled batch size {}".format(cfg["labeledbatchsize"])
-
-# print(len(labeled_idxs))
-
-# Create DataLoader
-train_loader = torch.utils.data.DataLoader(dataset,
-                                            batch_sampler=batch_sampler,
-                                            num_workers= 4,
-                                            pin_memory=True)
-
-eval_loader = torch.utils.data.DataLoader(
-    torchvision.datasets.ImageFolder(evaldir, eval_transformation),
-    batch_size=cfg["batchsize"],
-    shuffle=False,
-    num_workers=2 * 4,  # Needs images twice as fast
-    pin_memory=True,
-    drop_last=False)
-
-# Define Writer
-# writer = SummaryWriter(log_dir = './runs/Semi-Cifar10/' +time.asctime(time.localtime(time.time())))
-writer = SummaryWriter(logdir=os.path.join(savepath,"runs"))
-writer.add_text('Text', "| Hyper Params Are : LR:{} Batch Size:{} Ratio:{} th:{}, Quan: {}".format( cfg["lr"], BATCH_SIZE, cfg["ratio"], cfg["th"], args.quan) + time.asctime(time.localtime(time.time())))
-
-# Define Model
-if (args.quan):
-    teacher_net = MyNet_fix()
-    student_net = MyNet_fix()
-else:
-    teacher_net = MyNet()
-    student_net = MyNet()
-
-for _, param in enumerate(teacher_net.parameters()):
-    param.requires_grad = False
-
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-gpu_list = []
-if (DEVICE == 'cuda'):
-    if (args.gpu is not "m"):
-        gpu_list = args.gpu.split(",")
-        DEVICE = DEVICE+":"+gpu_list[0]
-
-
-teacher_net.to(DEVICE)
-student_net.to(DEVICE)
-
-
-if (args.gpu == "m"):
-    teacher_net = torch.nn.DataParallel(teacher_net, device_ids=[0,1,2,3])
-    student_net = torch.nn.DataParallel(student_net, device_ids=[0,1,2,3])
-elif len(gpu_list) > 1:
-    teacher_net = torch.nn.DataParallel(teacher_net, device_ids=[int(d) for d in gpu_list])
-    student_net = torch.nn.DataParallel(student_net, device_ids=[int(d) for d in gpu_list])
-use_parallel = args.gpu == "m" or len(gpu_list) > 1
-cudnn.benchmark = True
-
-# Disable BackProp For Teacher
-for _, param in enumerate(teacher_net.parameters()):
-    param.requires_grad = False
-
-# Define Optimizer
-if (cfg["opt"] == "sgd"):
-     # student_optimizer = torch.optim.SGD(student_net.parameters(), lr = LEARINING_RATE,momentum = 0.99,weight_decay=5e-4) 
-    student_optimizer = torch.optim.SGD(student_net.parameters(), lr = LEARINING_RATE,momentum = 0.9, weight_decay=4e-2, nesterov=True) 
-elif(cfg["opt"] == "adam"):
-    # student_optimizer = torch.optim.Adam(student_net.parameters(), lr = LEARINING_RATE,weight_decay=5e-4) 
-    student_optimizer = torch.optim.Adam(student_net.parameters(), lr = LEARINING_RATE) 
-else:
-    print("Unrecognized Optim Method, Use SGD as default")
-    # student_optimizer = torch.optim.SGD(student_net.parameters(), lr = LEARINING_RATE,momentum = 0.99,weight_decay=5e-4) 
-    student_optimizer = torch.optim.SGD(student_net.parameters(), lr = LEARINING_RATE,momentum = 0.9, weight_decay=4e-2, nesterov=True) 
-# The Teacher's Param Is Changeing According To The Student
-teacher_optimizer = EMAWeightOptimizer(teacher_net, student_net, alpha = TEACHRE_ALPHA, quan = args.quan)
-criterion = nn.CrossEntropyLoss(ignore_index=-1).to(DEVICE)
-
-if (args.resume):
-    print('==> Resuming from checkpoint..')
-    checkpoint = torch.load(args.resume)
-    student_net.load_state_dict(checkpoint['net'])
-    student_net.load_state_dict(checkpoint['net1'])
-    best_acc = checkpoint['acc']
-
-def _set_quan_method_train():
-    if (use_parallel):
-        student_net.module.set_fix_method(nfp.FIX_AUTO, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_AUTO, "bias": nfp.FIX_AUTO, "running_mean": nfp.FIX_NONE, "running_var": nfp.FIX_NONE}})
-        teacher_net.module.set_fix_method(nfp.FIX_AUTO, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_AUTO, "bias": nfp.FIX_AUTO, "running_mean": nfp.FIX_NONE, "running_var": nfp.FIX_NONE}})
-    else:
-        student_net.set_fix_method(nfp.FIX_AUTO, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_AUTO, "bias": nfp.FIX_AUTO, "running_mean": nfp.FIX_NONE, "running_var": nfp.FIX_NONE}})
-        teacher_net.set_fix_method(nfp.FIX_AUTO, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_AUTO, "bias": nfp.FIX_AUTO, "running_mean": nfp.FIX_NONE, "running_var": nfp.FIX_NONE}})
-
-def _set_quan_method_eval():
-    if (use_parallel):
-        student_net.module.set_fix_method(nfp.FIX_FIXED, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_FIXED, "bias": nfp.FIX_FIXED, "running_mean": nfp.FIX_AUTO, "running_var": nfp.FIX_AUTO}})
-        teacher_net.module.set_fix_method(nfp.FIX_FIXED, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_FIXED, "bias": nfp.FIX_FIXED, "running_mean": nfp.FIX_AUTO, "running_var": nfp.FIX_AUTO}})
-    else:
-        student_net.set_fix_method(nfp.FIX_FIXED, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_FIXED, "bias": nfp.FIX_FIXED, "running_mean": nfp.FIX_AUTO, "running_var": nfp.FIX_AUTO}})
-        teacher_net.set_fix_method(nfp.FIX_FIXED, method_by_type={"BatchNorm2d_fix": {"weight": nfp.FIX_FIXED, "bias": nfp.FIX_FIXED, "running_mean": nfp.FIX_AUTO, "running_var": nfp.FIX_AUTO}})
-
-# ---------------------------------------
-def WarmUp(epoch):
-
-    accumulated_clf_loss = 0.0
-    accumulated_aug_loss = 0.0
-    accumulated_mean_conf = 0.0
-
-    # student_net.module.train()
-    # teacher_net.module.train()
-
-    if(args.quan):
-        _set_quan_method_train()
+    if args.local_rank > -1:
+        torch.cuda.set_device(args.local_rank)
     
-    student_net.module.train()
-    teacher_net.module.train()
-
-    # Load Data & Main Train Loop
-    num_of_iter = len(train_loader)
-    pbar_train = tqdm(train_loader)
-
-    for i, ((input_s, input_t), label) in enumerate(pbar_train):
-            
-        lr_warmup(student_optimizer, epoch, i, num_of_iter, cfg["lr"])
-        input_s, input_t, label = input_t.to(DEVICE), input_s.to(DEVICE), label.to(DEVICE)
-
-        student_logits_out_t = student_net(input_s)   # The Net Gievs a tuple [BATCH_SIZE*128, BATCH_SIZE*NUM_CLASSES]
-
-        clf_loss = criterion(student_logits_out_t, label) 
-
-        student_optimizer.zero_grad()
-        clf_loss.backward()
-        student_optimizer.step()
-
-        accumulated_clf_loss += clf_loss
-
-        pbar_train.set_description("| The {} Epoch | Loss {:3f}| ".\
-        format(epoch,accumulated_clf_loss/(i+1)))
-
-        writer.add_scalar('WarmUp/Loss',clf_loss,i+epoch*num_of_iter)
-        writer.add_scalar('Warmup/lr',student_optimizer.param_groups[0]['lr'], i+epoch*num_of_iter)
-
-
-def train(epoch):
-
-    global student_optimizer
-
-    if (args.quan):
-        lr_decay(student_optimizer, epoch, cfg["lr"], 10)
+    if args.distributed: 
+        # device = torch.cuda.current_device()
+        torch.distributed.init_process_group(backend="nccl")
     else:
-        if(args.lrdecay):
-            lr_decay(student_optimizer, epoch, cfg["lr"], rate = 10, stop = 50)
+        gpus = [int(d) for d in args.gpu.split(",")]
+        torch.cuda.set_device(gpus[0])
 
-    accumulated_clf_loss = 0.0
-    accumulated_aug_loss = 0.0
-    accumulated_mean_conf = 0.0
+    if args.seed is not None:
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        random.seed(args.seed)
 
-    if(args.quan):
-        _set_quan_method_train()
-
-    student_net.train()
-    teacher_net.train()
-
-
-    # Load Data & Main Train Loop
-    num_of_iter = len(train_loader)
-    pbar_train = tqdm(train_loader)
-
-    # iter_train = iter(train_loader)
-    # pbar_train = tqdm(range(len(train_loader)))
-
-    # for i in pbar_train:
-        # ((input_s,input_t),label) = iter_train.next()
-
-    for i, ((input_s, input_t), label) in enumerate(pbar_train):
-
-        # make sure batch_szie is BATCH_SIZE
-        try:
-            assert label.shape[0] == BATCH_SIZE
-        except AssertionError as er:
-            print("Error, The Batch Size is {}".format(label.shape[0]))
-
-        # Only Apply WarmUp At 1st epoch
-        if (args.resume == ''):
-            if (cfg["batchsize"] > 256):
-                if (epoch < 2): # * Could Be Buggy with LR Decay,so only works in rampup epochs
-                    lr_warmup(student_optimizer, epoch, i, num_of_iter, cfg["lr"], 2)
-
-        input_s, input_t, label = input_t.to(DEVICE), input_s.to(DEVICE), label.to(DEVICE)
-
-
-        student_logits_out_t = student_net(input_s)   # The Net Gievs a tuple [BATCH_SIZE*128, BATCH_SIZE*NUM_CLASSES]
-        teacher_logits_out_t = teacher_net(input_t) 
-        student_prob_out_t = F.softmax(student_logits_out_t, dim=1)
-        teacher_prob_out_t = F.softmax(teacher_logits_out_t, dim=1)
-
-        # print("!",label[int(BATCH_SIZE/2):BATCH_SIZE])
-        clf_loss = criterion(student_logits_out_t, label)   # The Crossentropy ignores -1, so dont need 
-        # aug_loss, num_masked_this_batch, mean_conf_this_batch = GetAugLoss(student_prob_out_t, teacher_prob_out_t, CONFIDENCE_THRESHOLD)
-        aug_loss, num_masked_this_batch, mean_conf_this_batch = GetAugLossWithLogits(student_prob_out_t, teacher_prob_out_t, CONFIDENCE_THRESHOLD, student_logits_out_t, teacher_logits_out_t)
-        # aug_loss, num_masked_this_batch, mean_conf_this_batch = GetAugLossWithLogits(student_prob_out_t, teacher_prob_out_t, CONFIDENCE_THRESHOLD, student_prob_out_t, teacher_prob_out_t)   # * Use The Prob For Softmax
-        final_loss = clf_loss + AUG_LOSS_INDEX*aug_loss
-
-        student_optimizer.zero_grad()
-        final_loss.backward()
-        student_optimizer.step()
-        teacher_optimizer.step()
-
-        accumulated_clf_loss += clf_loss
-        accumulated_aug_loss += aug_loss
-        accumulated_mean_conf += mean_conf_this_batch
-
-        pbar_train.set_description("| The {} Epoch | LR : {:4f} | Loss {:3f}| Cls Loss {:3f} | Aug Loss {:3f} | {:3f} MeanConf | {:3f}% Was Masked |".\
-        format(epoch, student_optimizer.param_groups[0]['lr'], final_loss,accumulated_clf_loss/(i+1), accumulated_aug_loss/(i+1), accumulated_mean_conf/(i+1),100 - 100*(num_masked_this_batch/BATCH_SIZE)))
-
-        writer.add_scalar('Train/Loss',final_loss,i+epoch*num_of_iter)
-        writer.add_scalar('Train/lr',student_optimizer.param_groups[0]['lr'], i+epoch*num_of_iter)
-        # writer.add_scalar('Train/Clf_Loss', accumulated_clf_loss/(i+1),i+epoch*num_of_iter)
-        writer.add_scalar('Train/Clf_Loss', clf_loss,i+epoch*num_of_iter)
-        # writer.add_scalar('Train/Aug_Loss',  accumulated_aug_loss/(i+1),i+epoch*num_of_iter)
-        writer.add_scalar('Train/Aug_Loss',  aug_loss,i+epoch*num_of_iter)
-        writer.add_scalar('Train/Mean_Conf', accumulated_mean_conf/(i+1),i+epoch*num_of_iter)
-        writer.add_scalar('Train/Mask_Ratio', 100-100*(num_masked_this_batch/BATCH_SIZE),i+epoch*num_of_iter)
-
-# The Eval
-def test(epoch):
-    global best_acc
-    global test_num
-
-    if(args.quan):
-        _set_quan_method_eval()
-
-    student_net.eval()
-    teacher_net.eval()
-
-    accumulated_loss = 0.0
-    accumulated_acc = 0.0
-    correct = 0
-    total = 0
-    # Test On Source
-    
-    pbar_val = tqdm(range(int(len(eval_loader))))
-    iter_val = iter(eval_loader)
-
-    # dataloader_s1_tqdm = tqdm(testloader.datasets[0])
-    # for batch_idx, (inputs, targets) in enumerate(dataloader_s1_tqdm):
-    for batch_idx in pbar_val:
-        inputs, targets = iter_val.next()
-        inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-        outputs = F.softmax(teacher_net(inputs), dim = 1)
-        # outputs = F.softmax(student_net(inputs), dim = 1) # !!!
-        _,predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
-        acc_this_batch = 100*(correct/total)
-        accumulated_acc += acc_this_batch
-        # dataloader_s1_tqdm.set_description("| SOURCE: [{}] | Val Acc Is {:3f}|".format(SOURCE_DOMAIN,accumulated_acc/(1+batch_idx)))
-        pbar_val.set_description("| Val Acc Is {:3f}|".format(accumulated_acc/(1+batch_idx)))
-    
-    test_num = test_num + 1
-    writer.add_scalar('Val/Acc',accumulated_acc/(1+batch_idx),test_num)
-
-        # Save The Model
-    acc = accumulated_acc/(1+batch_idx)
-    if acc > best_acc:
-        state = {
-            'net': student_net.state_dict(),
-            'net1': teacher_net.state_dict(),
-            'acc': acc,
-            'epoch': epoch,
-        }
-        if not os.path.isdir('checkpoint'):
-            os.mkdir('checkpoint')
-        if (args.quan):
-            torch.save(state, './checkpoint/ckpt_'+'SemiCifarQ'+'_'+str(round(acc,2))+'.pth')
+    if not os.path.isdir(savepath):
+        if sys.version_info.major == 2:
+            os.makedirs(savepath)
         else:
-            torch.save(state, './checkpoint/ckpt_'+'SemiCifar'+'_'+str(round(acc,2))+'.pth')
-        best_acc = acc
-    writer.add_scalar('Final/Acc',best_acc,epoch)
+            os.makedirs(savepath, exist_ok=True)
+    # Setup logfile
 
+    # log_format = "%(asctime)s %(filename)s [line:%(lineno)d] %(levelname)s \t: %(message)s"
+    log_format = "%(message)s"
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format,
+        filemode="w")
+    if args.local_rank == 0 or args.local_rank == -1:
+        file_handler = logging.FileHandler(os.path.join(savepath, "train.log"))
+    else:
+        # file_handler = logging.FileHandler("/dev/null")
+        file_handler = logging.FileHandler(os.path.join(savepath, "train_{}.log".format(args.local_rank)))
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(file_handler)
+    logging.info("CMD: %s", " ".join(sys.argv))
 
+    # Load and backup configuration file
+    shutil.copyfile(args.cfg, os.path.join(savepath, "config.yaml"))
+    with open(args.cfg) as cfg_f:
+        cfg = yaml.load(cfg_f)
+    
+    device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+    
+    if device == "cuda":
+        logging.info("Using GPU! Available gpu count: {}".format(torch.cuda.device_count()))
+    else:
+        logging.info("\033[1;3mWARNING: Using CPU!\033[0m")
 
-    # ---- Then Test Float Again ----------
-    if(args.quan):
-        if (use_parallel):
-            student_net.module.set_fix_method(nfp.FIX_NONE)
-            teacher_net.module.set_fix_method(nfp.FIX_NONE)
-        else:
-            student_net.set_fix_method(nfp.FIX_NONE)
-            teacher_net.set_fix_method(nfp.FIX_NONE)
+## Dataset
+    logging.info("==> Preparing data..")
+    if cfg["trainer"]["dataset"] == "cifar":
+        trainloader,validloader, ori_trainloader, testloader, _ = datasets.cifar10(cfg["trainer"].get("train_batch_size",None), cfg["trainer"].get("test_batch_size",None), cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, root=args.dataset_path)
+    elif cfg["trainer"]["dataset"] == "imagenet":
+        trainloader,validloader, ori_trainloader, testloader, _ = datasets.imagenet(cfg["trainer"]["train_batch_size"], cfg["trainer"]["test_batch_size"], cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, path=args.dataset_path)
+    ## Build model
+    logging.info("==> Building model..")
 
-        student_net.eval()
-        teacher_net.eval()
+    ## ------- Net --------------
+    if cfg["trainer"]["model"] == "vgg":
+        net = vgg.VGG("VGG16")
+    net = net.to(device)
 
-        accumulated_loss = 0.0
-        accumulated_acc = 0.0
-        correct = 0
-        total = 0
-        # Test On Source
-        
-        pbar_val = tqdm(range(int(len(eval_loader))))
-        iter_val = iter(eval_loader)
+    if device == "cuda":
+        cudnn.benchmark = True
+        if args.distributed:
+            p_net = torch.nn.parallel.DistributedDataParallel(net, [args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
+        else: 
+            if len(gpus) > 1:
+                p_net = torch.nn.DataParallel(net, gpus)
+            else:
+                p_net = net
 
-        # dataloader_s1_tqdm = tqdm(testloader.datasets[0])
-        # for batch_idx, (inputs, targets) in enumerate(dataloader_s1_tqdm):
-        for batch_idx in pbar_val:
-            inputs, targets = iter_val.next()
-            inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-            outputs = F.softmax(teacher_net(inputs), dim = 1)
-            # outputs = F.softmax(student_net(inputs), dim = 1) # !!!
-            _,predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            acc_this_batch = 100*(correct/total)
-            accumulated_acc += acc_this_batch
-            # dataloader_s1_tqdm.set_description("| SOURCE: [{}] | Val Acc Is {:3f}|".format(SOURCE_DOMAIN,accumulated_acc/(1+batch_idx)))
-            pbar_val.set_description("| Val Acc(Float) Is {:3f}|".format(accumulated_acc/(1+batch_idx)))
-        
-        writer.add_scalar('Val/Acc_f',accumulated_acc/(1+batch_idx),test_num)
+    ## Build trainer and train
+    if cfg["trainer_type"] == "plain":
+        trainer = Trainer(net,p_net,[trainloader,validloader,ori_trainloader],testloader,
+                                                               savepath=savepath,
+                                                               save_every=args.save_every,
+                                                               log=logging.info, cfg=cfg["trainer"])
+
+    trainer.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)
+    trainer.train()
+
+    # Default save for plot
+    torch.save({"net":trainer.net.state_dict()}, os.path.join(savepath,'ckpt_final.t7'))
 
 if __name__ == "__main__":
-    best_acc = 0.0
-    test_num = 0
+    main(sys.argv[1:])
 
-    if (cfg["warmup_epochs"] > 0):
-        for i in range(cfg["warmup_epochs"]):
-            WarmUp(i) 
-    
-    for i in range(cfg["epoch"]):
-        train(i)
-        test(i)
+
