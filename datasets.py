@@ -747,8 +747,9 @@ def semi_cifar10(numlabel = 4000,label_bs=64,train_bs=128, test_bs=100, train_tr
 
     return trainloader ,testloader, classes
 
-# ---------------- Loader For The SVHN Scenario (With Data.npy) ----------------------
-
+# --------------------------------------------------------------------------------------------------------------
+# ------------------- Loader For The SVHN Scenario (With Data.npy) ---------------------------------------------
+# --------------------------------------------------------------------------------------------------------------
 
 import numpy as np
 import os
@@ -772,13 +773,13 @@ eval_transformation = transforms.Compose([
 ])
 
 class SVHN_SEMI:
-    def __init__(self, root, split="l_train", train = True):
-        self.dataset = np.load(os.path.join(root, "svhn", split+".npy"), allow_pickle=True).item()
+    def __init__(self, root, split=["l_train"], train = True):
+        self.dataset = [np.load(os.path.join(root, "svhn", s+".npy"), allow_pickle=True).item() for s in split]
         self.train = train
 
     def __getitem__(self, idx):
-        image = self.dataset["images"][idx]
-        label = self.dataset["labels"][idx]
+        image = self.dataset[0]["images"][idx]
+        label = self.dataset[0]["labels"][idx]
         image_PIL = transforms.ToPILImage()(image.reshape([32,32,3]))  
         if (self.train == True):
             images_aug = train_transformation(image_PIL)
@@ -787,7 +788,7 @@ class SVHN_SEMI:
         return images_aug , label
 
     def __len__(self):
-        return len(self.dataset["images"])
+        return sum([len(dataset["images"]) for dataset in self.dataset])
 
 class RandomSampler(torch.utils.data.Sampler):
     """ sampling without replacement """
@@ -801,3 +802,61 @@ class RandomSampler(torch.utils.data.Sampler):
 
     def __len__(self):
         return len(self.indices)
+
+def semi_svhn(numlabel = 1000,label_bs=64,train_bs=128, test_bs=100, train_transform=None, test_transform=None, root='./data',distributed=False,cfg=None):
+    if root is None:
+        root = './data'
+    if numlabel != 1000:
+        raise Exception("Unsupported Num Label{} , Only 1000 ".format(numlabel))
+    if label_bs is None:
+        label_bs = 64
+    if train_bs is None:
+        train_bs = 128
+    if test_bs is None:
+        test_bs = 100
+    train_transform = train_transform or []
+    test_transform = test_transform or []
+    print("train transform: ", train_transform)
+    print("test transform: ", test_transform)
+
+    transform_train = TransformTwice(transforms.Compose([
+            RandomTranslateWithReflect(4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(**channel_stats)
+        ]))
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(**channel_stats)
+    ])
+
+    # .npy file should be put under folder root+"svhn/$NAME.npy"
+    trainset_l = SVHN_SEMI(root,["l_train",],train=True)
+    trainset_u = SVHN_SEMI(root,["u_train"],train=True)
+    valset = SVHN_SEMI(root,["val"],train=False)
+    testset = SVHN_SEMI(root,["test"],train=False)
+
+
+
+
+    # Pack Up Batch Sampler
+    trainloader_l = torch.utils.data.DataLoader(trainset_l,
+                                                label_bs,
+                                                drop_last=True,
+                                                sampler=RandomSampler(len(trainset_l),len(trainset_u)*cfg["trainer"]["epochs"]), # the Sampler total should align with the bigger num(The Unlabeled Data)
+                                                num_workers= 4,
+                                                pin_memory=True)
+
+    trainloader_u = torch.utils.data.DataLoader(trainset_u,
+                                                train_bs - label_bs,
+                                                drop_last=True,
+                                                sampler=RandomSampler(len(trainset_u),len(trainset_u)*cfg["trainer"]["epochs"]),
+                                                num_workers= 4,
+                                                pin_memory=True)
+
+    valloader = torch.utils.data.DataLoader(valset, batch_size=test_bs, shuffle=False, num_workers=4,pin_memory=True)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=test_bs, shuffle=False, num_workers=4,pin_memory=True)
+
+
+    return trainloader_l,trainloader_u,valloader,testloader

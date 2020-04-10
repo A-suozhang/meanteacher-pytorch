@@ -120,6 +120,17 @@ def main(argv):
                                                                test_transform=None,
                                                                root=args.dataset_path,
                                                                label_dir=None)
+        elif cfg["trainer"]["dataset"] == "svhn":
+            trainloader_l,trainloader_u,valloader,testloader = datasets.semi_svhn(
+                numlabel=cfg["trainer"]["numlabel"],
+                label_bs=cfg["trainer"].get("label_batch_size",None),
+                train_bs=cfg["trainer"].get("train_batch_size",None),
+                test_bs=cfg["trainer"].get("test_batch_size",None),
+                train_transform=None,
+                test_transform=None,
+                root=args.dataset_path,
+                cfg=cfg
+            )
 
 
     ## Build model
@@ -167,12 +178,21 @@ def main(argv):
                                                                save_every=args.save_every,
                                                                log=logging.info, cfg=cfg["trainer"])
     elif cfg["trainer_type"] == "semi":
-        trainer_ = semi_trainer.SemiTrainer(net, net_, p_net, p_net_,
-                                            trainloader, testloader,
-                                            savepath=savepath,
-                                            save_every=args.save_every,
-                                            log=logging.info,
-                                            cfg=cfg["trainer"])
+        if cfg["trainer"]["dataset"] == "cifar":
+            trainer_ = semi_trainer.SemiTrainer(net, net_, p_net, p_net_,
+                                                trainloader, testloader,
+                                                savepath=savepath,
+                                                save_every=args.save_every, 
+                                                 log=logging.info,
+                                                 cfg=cfg["trainer"])
+        if cfg["trainer"]["dataset"] == "svhn":
+            trainer_ = semi_trainer.SemiTrainer(net, net_, p_net, p_net_,
+                                                [trainloader_l,trainloader_u], testloader,
+                                                savepath=savepath,
+                                                save_every=args.save_every, 
+                                                 log=logging.info,
+                                                 cfg=cfg["trainer"])
+
 
 
     trainer_.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)

@@ -61,6 +61,7 @@ class SemiTrainer(Trainer):
         self.tch_net = tch_net
         for _, param in enumerate(tch_net.parameters()):
             param.requires_grad = False
+        self.net = self.tch_net # should not use self.net here, its simply the copy of self.tch_net
         self.stu_net = stu_net
         self.p_tch_net = p_tch_net
         self.p_stu_net = p_stu_net
@@ -235,39 +236,79 @@ class SemiTrainer(Trainer):
             train_loss = 0
             correct = 0
             total = 0
-            for batch_idx, ((input_s, input_t), targets) in enumerate(self.trainloader):
-                input_s, input_t, targets = input_s.to(self.device), input_t.to(self.device), targets.to(self.device)
-                self.stu_optimizer.zero_grad()
-                stu_logits = self.p_stu_net(input_s)
-                tch_logits = self.p_tch_net(input_t)
-                stu_probs = F.softmax(stu_logits, dim=1)
-                tch_probs = F.softmax(tch_logits, dim=1)
+            # the CIFAR-10 Style DataLoader, Dirty, Maybe Fix Later
+            if type(self.trainloader) == list:
+                for batch_idx, ((input_l, target_l),(input_u,target_u)) in enumerate(zip(self.trainloader[0],self.trainloader[1])):
+                    targets = torch.cat([target_l,target_u])
+                    input_s = torch.cat([input_l[0],input_l[0]])
+                    input_t = torch.cat([input_l[1],input_u[1]])
+                    input_s, input_t, targets = input_s.to(self.device), input_t.to(self.device), targets.to(self.device)
+                    self.stu_optimizer.zero_grad()
+                    stu_logits = self.p_stu_net(input_s)
+                    tch_logits = self.p_tch_net(input_t)
+                    stu_probs = F.softmax(stu_logits, dim=1)
+                    tch_probs = F.softmax(tch_logits, dim=1)
 
-                self.clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
-                self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
-                if self.warmup:
-                    loss = self.clf_loss
-                else:
-                    loss = self.clf_loss + self.cfg["ratio"]*self.aug_loss
-                loss.backward()
-                self.stu_optimizer.step()
-                self.tch_optimizer.step()
-        
-                train_loss += loss.item()
-                _, predicted = stu_probs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-        
-                if self.local_rank is not -1:
-                    if self.local_rank == 0:
+                    self.clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
+                    self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+                    if self.warmup:
+                        loss = self.clf_loss
+                    else:
+                        loss = self.clf_loss + self.cfg["ratio"]*self.aug_loss
+                    loss.backward()
+                    self.stu_optimizer.step()
+                    self.tch_optimizer.step()
+            
+                    train_loss += loss.item()
+                    _, predicted = stu_probs.max(1)
+                    total += targets.size(0)
+                    correct += predicted.eq(targets).sum().item()
+            
+                    if self.local_rank is not -1:
+                        if self.local_rank == 0:
+                            progress_bar(batch_idx, len(self.trainloader[0]), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                    else:
+                        progress_bar(batch_idx, len(self.trainloader[0]), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                self.log("Train: loss: {:.3f} | acc: {:.3f} %"
+                                 .format(train_loss/len(self.trainloader), 100.*correct/total))
+                self.test()
+
+            else:
+                for batch_idx, ((input_s, input_t), targets) in enumerate(self.trainloader):
+                    input_s, input_t, targets = input_s.to(self.device), input_t.to(self.device), targets.to(self.device)
+                    self.stu_optimizer.zero_grad()
+                    stu_logits = self.p_stu_net(input_s)
+                    tch_logits = self.p_tch_net(input_t)
+                    stu_probs = F.softmax(stu_logits, dim=1)
+                    tch_probs = F.softmax(tch_logits, dim=1)
+
+                    self.clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
+                    self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+                    if self.warmup:
+                        loss = self.clf_loss
+                    else:
+                        loss = self.clf_loss + self.cfg["ratio"]*self.aug_loss
+                    loss.backward()
+                    self.stu_optimizer.step()
+                    self.tch_optimizer.step()
+            
+                    train_loss += loss.item()
+                    _, predicted = stu_probs.max(1)
+                    total += targets.size(0)
+                    correct += predicted.eq(targets).sum().item()
+            
+                    if self.local_rank is not -1:
+                        if self.local_rank == 0:
+                            progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                    else:
                         progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                 .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-                else:
-                    progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                 .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-            self.log("Train: loss: {:.3f} | acc: {:.3f} %"
-                             .format(train_loss/len(self.trainloader), 100.*correct/total))
-            self.test()
+                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                self.log("Train: loss: {:.3f} | acc: {:.3f} %"
+                                 .format(train_loss/len(self.trainloader), 100.*correct/total))
+                self.test()
 
     def test(self, save=True):
         self.stu_net.eval()

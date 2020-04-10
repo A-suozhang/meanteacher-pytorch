@@ -10,6 +10,7 @@ trainer:
     th: 0.75
     ratio: 0.3
     warmup_epochs: 0
+    teacher_alpha: 0.9921875
     optimizer_type: "SGD"
     stu_optimizer: 
         lr: 0.1
