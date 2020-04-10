@@ -609,23 +609,9 @@ class TransformTwice:
         out2 = self.transform(inp)
         return out1, out2
 
-# train_transformation = TransformTwice(transforms.Compose([
-#         RandomTranslateWithReflect(4),
-#         transforms.RandomHorizontalFlip(),
-#         transforms.ToTensor(),
-#         transforms.Normalize(**channel_stats)
-#     ]))
-# eval_transformation = transforms.Compose([
-#     transforms.ToTensor(),
-#     transforms.Normalize(**channel_stats)
-# ])
-
-# 'datadir': 'data-local/images/cifar/cifar10/by-image',
-# 'num_classes': 10
-# channel_stats = dict(mean=[0.4914, 0.4822, 0.4465],
-#                         std=[0.2470,  0.2435,  0.2616])
-
+# --------------------------------------------------------------------------------------------------------------
 # ---------------- Loader For The Cifar10 Scenario (With Label.txt Denoting Labeled Data))----------------------
+# --------------------------------------------------------------------------------------------------------------
 
 NO_LABEL = -1
 def relabel_dataset(dataset, labels):
@@ -698,6 +684,68 @@ def grouper(iterable, n):
     # grouper('ABCDEFG', 3) --> ABC DEF"
     args = [iter(iterable)] * n
     return zip(*args)
+
+
+def semi_cifar10(numlabel = 4000,label_bs=64,train_bs=128, test_bs=100, train_transform=None, test_transform=None, root='./data', label_dir=None, distributed=False):
+    if root is None:
+        root = 'data-local/images/cifar/cifar10/by-image'
+    if label_dir is None:
+        label_dir = "data-local/labels/cifar10/4000_balanced_labels/00.txt"
+    if label_bs is None:
+        label_bs = 64
+    if train_bs is None:
+        train_bs = 128
+    if test_bs is None:
+        test_bs = 100
+    train_transform = train_transform or []
+    test_transform = test_transform or []
+    print("train transform: ", train_transform)
+    print("test transform: ", test_transform)
+
+
+    transform_train = TransformTwice(transforms.Compose([
+            RandomTranslateWithReflect(4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(**channel_stats)
+        ]))
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    ])
+
+    train_dir = os.path.join(root,"train")
+    eval_dir = os.path.join(root,"val")
+
+    trainset = torchvision.datasets.ImageFolder(train_dir,transform_train)
+    num_train = len(trainset)
+    # Pack Up Batch Sampler
+    with open(label_dir) as f:
+        labels = dict(line.split(' ') for line in f.read().splitlines())
+        labeled_idxs, unlabeled_idxs = relabel_dataset(trainset, labels)
+    if numlabel== -1:  # Only Train On Labeled Data
+        sampler = SubsetRandomSampler(labeled_idxs)
+        batch_sampler = BatchSampler(sampler, train_bs, drop_last=True)
+    elif numlabel:   # Train With Both  (Pack The DataSet)
+        batch_sampler = TwoStreamBatchSampler(
+            unlabeled_idxs, labeled_idxs, train_bs, label_bs)
+    else:
+        assert False, "labeled batch size {}".format(label_bs)
+
+    # indices = range(num_train)
+    # split = int(np.floor(train_val_split_ratio*num_train)) # The percentage fo train in total
+    trainloader = torch.utils.data.DataLoader(trainset,
+                                            batch_sampler=batch_sampler,
+                                            num_workers= 4,
+                                            pin_memory=True)
+
+    testset = torchvision.datasets.ImageFolder(eval_dir, transform_test)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=test_bs, shuffle=False, num_workers=4,pin_memory=True)
+
+    classes = ("plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck")
+
+    return trainloader ,testloader, classes
 
 # ---------------- Loader For The SVHN Scenario (With Data.npy) ----------------------
 

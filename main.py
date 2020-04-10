@@ -26,9 +26,9 @@ import torchvision.transforms as transforms
 
 
 import datasets
-import models
 from models import *
 from trainer import *
+# import trainer
 from utils import *
 
 def main(argv):
@@ -102,20 +102,54 @@ def main(argv):
     else:
         logging.info("\033[1;3mWARNING: Using CPU!\033[0m")
 
-## Dataset
+# ----------------------  Dataset -------------------------
+
     logging.info("==> Preparing data..")
-    if cfg["trainer"]["dataset"] == "cifar":
-        trainloader,validloader, ori_trainloader, testloader, _ = datasets.cifar10(cfg["trainer"].get("train_batch_size",None), cfg["trainer"].get("test_batch_size",None), cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, root=args.dataset_path)
-    elif cfg["trainer"]["dataset"] == "imagenet":
-        trainloader,validloader, ori_trainloader, testloader, _ = datasets.imagenet(cfg["trainer"]["train_batch_size"], cfg["trainer"]["test_batch_size"], cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, path=args.dataset_path)
+    if cfg["trainer_type"] == "plain":
+        if cfg["trainer"]["dataset"] == "cifar":
+            trainloader,validloader, ori_trainloader, testloader, _ = datasets.cifar10(cfg["trainer"].get("train_batch_size",None), cfg["trainer"].get("test_batch_size",None), cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, root=args.dataset_path)
+        elif cfg["trainer"]["dataset"] == "imagenet":
+            trainloader,validloader, ori_trainloader, testloader, _ = datasets.imagenet(cfg["trainer"]["train_batch_size"], cfg["trainer"]["test_batch_size"], cfg["trainer"].get("train_transform", None), cfg["trainer"].get("test_transform", None), train_val_split_ratio = None, distributed=args.distributed, path=args.dataset_path)
+    elif cfg["trainer_type"] == "semi":
+        if cfg["trainer"]["dataset"] == "cifar":
+            trainloader, testloader, _ = datasets.semi_cifar10(numlabel=cfg["trainer"]["numlabel"], 
+                                                               label_bs=cfg["trainer"].get("label_batch_size",None),
+                                                               train_bs=cfg["trainer"].get("train_batch_size",None),
+                                                               test_bs=cfg["trainer"].get("test_batch_size",None),
+                                                               train_transform=None,
+                                                               test_transform=None,
+                                                               root=args.dataset_path,
+                                                               label_dir=None)
+
+
     ## Build model
+
     logging.info("==> Building model..")
 
     ## ------- Net --------------
-    if cfg["trainer"]["model"] == "vgg":
+    net_type = cfg["trainer"]["model"]
+    if net_type == "vgg":
         net = vgg.VGG("VGG16")
-    net = net.to(device)
+    elif net_type == "convnet":
+        net = convnet.MyNet()
 
+    # Copy apiece of net for semi training
+    if cfg["trainer_type"] == "semi":
+        net_ = type(net)()
+        net_.load_state_dict(net.state_dict())
+        net_ = net_.to(device)
+        if device == "cuda":
+            cudnn.benchmark = True
+            if args.distributed:
+                p_net_ = torch.nn.parallel.DistributedDataParallel(net_, [args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
+            else: 
+                if len(gpus) > 1:
+                    p_net_ = torch.nn.DataParallel(net_, gpus)
+                else:
+                    p_net_ = net_
+
+
+    net = net.to(device)
     if device == "cuda":
         cudnn.benchmark = True
         if args.distributed:
@@ -128,16 +162,24 @@ def main(argv):
 
     ## Build trainer and train
     if cfg["trainer_type"] == "plain":
-        trainer = Trainer(net,p_net,[trainloader,validloader,ori_trainloader],testloader,
+        trainer_ = trainer.Trainer(net,p_net,[trainloader,validloader,ori_trainloader],testloader,
                                                                savepath=savepath,
                                                                save_every=args.save_every,
                                                                log=logging.info, cfg=cfg["trainer"])
+    elif cfg["trainer_type"] == "semi":
+        trainer_ = semi_trainer.SemiTrainer(net, net_, p_net, p_net_,
+                                            trainloader, testloader,
+                                            savepath=savepath,
+                                            save_every=args.save_every,
+                                            log=logging.info,
+                                            cfg=cfg["trainer"])
 
-    trainer.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)
-    trainer.train()
+
+    trainer_.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)
+    trainer_.train()
 
     # Default save for plot
-    torch.save({"net":trainer.net.state_dict()}, os.path.join(savepath,'ckpt_final.t7'))
+    torch.save({"net":trainer_.net.state_dict()}, os.path.join(savepath,'ckpt_final.t7'))
 
 if __name__ == "__main__":
     main(sys.argv[1:])
