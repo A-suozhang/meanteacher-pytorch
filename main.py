@@ -131,8 +131,17 @@ def main(argv):
                 root=args.dataset_path,
                 cfg=cfg
             )
-
-
+    elif cfg["trainer_type"] == "da":
+        if cfg["trainer"]["dataset"] == "digits":
+            trainloader, testloader = datasets.da_digits(
+                domains = [cfg["trainer"]["source"],cfg["trainer"]["target"]],
+                train_bs = cfg["trainer"].get("train_batch_size",None),
+                test_bs = cfg["trainer"].get("test_batch_size",None),
+                train_transform=None,
+                test_transform=None,
+                root=args.dataset_path,
+                cfg=cfg
+            )
     ## Build model
 
     logging.info("==> Building model..")
@@ -144,8 +153,8 @@ def main(argv):
     elif net_type == "convnet":
         net = convnet.MyNet()
 
-    # Copy apiece of net for semi training
-    if cfg["trainer_type"] == "semi":
+    # Copy a piece of net for semi training & DA
+    if cfg["trainer_type"]=="semi" or cfg["trainer_type"]=="da":
         net_ = type(net)()
         net_.load_state_dict(net.state_dict())
         net_ = net_.to(device)
@@ -192,7 +201,14 @@ def main(argv):
                                                 save_every=args.save_every, 
                                                  log=logging.info,
                                                  cfg=cfg["trainer"])
-
+    elif cfg["trainer_type"] == "da":
+        trainer_ = da_trainer.DATrainer(net, net_, p_net, p_net_,
+                                                    trainloader, testloader,
+                                                    savepath=savepath,
+                                                    save_every=args.save_every, 
+                                                     log=logging.info,
+                                                     cfg=cfg["trainer"])
+            
 
 
     trainer_.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)

@@ -609,6 +609,18 @@ class TransformTwice:
         out2 = self.transform(inp)
         return out1, out2
 
+def da_digits(domains = ["svhn","mnist"],train_bs=128, test_bs=100, train_transform=None, test_transform=None, root='./data', label_dir=None, distributed=False,cfg=None):
+    if root is None:
+        root = "./data"
+    if train_bs is None:
+        train_bs = 128
+    trainloader = DigitsLoader('./data/', domains, shuffle=True, batch_size=train_bs, normalize=True, download=True,num_workers= 4, augment={domains[1]: 2},pin_memory = True)
+    testloader = DigitsLoader('./data',domains, shuffle = True, batch_size=train_bs, normalize =True,num_workers = 4,augment_func = None)
+    return trainloader, testloader
+#
+
+
+
 # --------------------------------------------------------------------------------------------------------------
 # ---------------- Loader For The Cifar10 Scenario (With Label.txt Denoting Labeled Data))----------------------
 # --------------------------------------------------------------------------------------------------------------
