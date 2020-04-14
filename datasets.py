@@ -434,7 +434,9 @@ import torch.utils.data
 
 
 class JointLoader:
-
+    # The Joint Loader Works in an infinte Manner
+    # If one subset is larger than the other
+    # Will Re-initialize the other dataloader
     def __init__(self, *datasets, collate_fn = None):
 
         self.datasets  = datasets
@@ -442,8 +444,8 @@ class JointLoader:
         self.collate_fn = collate_fn
 
     def __len__(self):
-
-        return min([len(d) for d in self.datasets])
+        # Return the max of the Datasets
+        return max([len(d) for d in self.datasets])
 
     def __iter__(self):
         for i, dataset in enumerate(self.datasets):
@@ -451,12 +453,15 @@ class JointLoader:
         return self
 
     def __next__(self):
-        try:
-            items = []
-            for dataset in self.iterators:
-                items.append(dataset.__next__())
-        except StopIteration:
-            raise StopIteration
+        items = []
+        for i, dataset in enumerate(self.datasets):
+            if self.iterators[i] is None:
+                self.iterators[i] = dataset.__iter__()
+            try:
+                items.append(self.iterators[i].__next__())
+            except StopIteration: 
+                self.iterators[i] = dataset.__iter__()
+                items.append(self.iterators[i].__next__())
 
         if self.collate_fn is not None:
             items = self.collate_fn(items)
@@ -537,7 +542,7 @@ class DigitsLoader(MultiDomainLoader):
         if isinstance(batch_size, int):
             batch_size = [batch_size] * len(keys)
 
-        super().__init__(*[DataLoader(self.datasets[k], batch_size=b, **kwargs) for k, b in zip(keys, batch_size)],
+        super().__init__(*[DataLoader(self.datasets[k], batch_size=b, drop_last=True, **kwargs) for k, b in zip(keys, batch_size)],
                          collate=collate
                          )
 
@@ -614,8 +619,8 @@ def da_digits(domains = ["svhn","mnist"],train_bs=128, test_bs=100, train_transf
         root = "./data"
     if train_bs is None:
         train_bs = 128
-    trainloader = DigitsLoader('./data/', domains, shuffle=True, batch_size=train_bs, normalize=True, download=True,num_workers= 4, augment={domains[1]: 2},pin_memory = True)
-    testloader = DigitsLoader('./data',domains, shuffle = True, batch_size=train_bs, normalize =True,num_workers = 4,augment_func = None)
+    trainloader = DigitsLoader('./data/', domains, shuffle=True, batch_size=train_bs, normalize=True, download=True,num_workers= 1, augment={domains[1]: 2},pin_memory = True)
+    testloader = DigitsLoader('./data',domains, shuffle = True, batch_size=train_bs, normalize =True,num_workers = 1,augment_func = None)
     return trainloader, testloader
 #
 

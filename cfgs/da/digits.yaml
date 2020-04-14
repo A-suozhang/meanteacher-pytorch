@@ -2,21 +2,21 @@ trainer_type: "da"
 trainer: 
     epochs: 20
     dataset: "digits"
-    source: "svhn"
-    target: "mnist"
+    source: "s"
+    target: "syn"
     label_batch_size: 128
     train_batch_size: 256
     test_batch_size: 256
     model: "convnet"
-    th: 0.75
-    ratio: 0.3
+    th: 0.8
+    ratio: 1
     warmup_epochs: 0
     teacher_alpha: 0.9921875
     optimizer_type: "SGD"
     stu_optimizer: 
         lr: 0.1
         momentum: 0.9
-        weight_decay: 5.e-4
+        weight_decay: 4.e-3
     lr_schedule:
         start: 0.1
         boundaries: [5,10]

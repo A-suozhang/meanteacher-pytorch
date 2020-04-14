@@ -237,62 +237,91 @@ class DATrainer(Trainer):
             correct = 0
             total = 0
             # the CIFAR-10 Style DataLoader, Dirty, Maybe Fix Later
+
+            """
             it_s = iter(self.trainloader.datasets[0])
             it_t = iter(self.trainloader.datasets[1])
+            """
 
-            for batch_idx in range(len(self.trainloader.datasets[0])):
-                try:
-                    input_t0, input_t1, target_t1 = it_t.next()
-                except StopIteration:
-                    new_digitloader = DigitsLoader('./data/', [self.cfg["source"],self.cfg["target"]], shuffle=True, batch_size = self.cfg["train_batch_size"], normalize=True, download=True,num_workers= 4, augment={self.cfg["target"]: 2},pin_memory = True)
-                    it_t = iter(new_digitloader.datasets[1])
-                    input_t0, input_t1, target_t1 = it_t.next()
-                    # ! this is not common, but when syn is source, the epoch is too long
-                    self.test()
+            # for batch_idx in range(len(self.trainloader.datasets[0])):
+            for batch_idx, [[input_s, target_s],[input_t0, input_t1, target_t1]] in enumerate(self.trainloader):
 
-                try:
-                    input_s, target_s = it_s.next()
-                except StopIteration:
-                    new_digitloader = DigitsLoader('./data/', [self.cfg["source"],self.cfg["target"]], shuffle=True, batch_size = self.cfg["train_batch_size"], normalize=True, download=True,num_workers= 4, augment={self.cfg["target"]: 2},pin_memory = True)
-                    it_s = iter(new_digitloader.datasets[0])
-                    input_s, target_s = it_s.next()
-                    # ! this is not common, but when syn is source, the epoch is too long
-                    self.test()
+                if (batch_idx < len(self.trainloader)):
 
-                for item in [input_t0,input_t1,target_t1,input_s,target_s]:
-                    item = item.to(self.device)
-                self.stu_optimizer.zero_grad()
-                logits = self.p_stu_net(input_s)
-                stu_logits = self.p_stu_net(input_t0)
-                tch_logits = self.p_tch_net(input_t1)
-                stu_probs = F.softmax(stu_logits, dim=1)
-                tch_probs = F.softmax(tch_logits, dim=1)
+                    """
+                    try:
+                        input_t0, input_t1, target_t1 = it_t.next()
+                    except StopIteration:
+                        new_digitloader = DigitsLoader('./data/', [self.cfg["source"],self.cfg["target"]], shuffle=True, batch_size = self.cfg["train_batch_size"], normalize=True, download=True,num_workers= 4, augment={self.cfg["target"]: 2},pin_memory = True)
+                        it_t = iter(new_digitloader.datasets[1])
+                        input_t0, input_t1, target_t1 = it_t.next()
+                        # ! this is not common, but when syn is source, the epoch is too long
+                        self.test()
 
-                self.clf_loss = self._get_loss(logits, target_s, getattr(self.stu_net, "logits_multi", None))
-                self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
-                if self.warmup:
-                    loss = self.clf_loss
+                    try:
+                        input_s, target_s = it_s.next()
+                    except StopIteration:
+                        new_digitloader = DigitsLoader('./data/', [self.cfg["source"],self.cfg["target"]], shuffle=True, batch_size = self.cfg["train_batch_size"], normalize=True, download=True,num_workers= 4, augment={self.cfg["target"]: 2},pin_memory = True)
+                        it_s = iter(new_digitloader.datasets[0])
+                        input_s, target_s = it_s.next()
+                        # ! this is not common, but when syn is source, the epoch is too long
+                        self.test()
+                    """
+
+                    # This Does not Work I dont quite know why
+                    # for item in [input_t0,input_t1,target_t1,input_s,target_s]:
+                    #     item = item.to(self.device)
+
+                    input_t0, input_t1, target_t1, input_s, target_s = \
+                        input_t0.to(self.device), input_t1.to(self.device), target_t1.to(self.device), \
+                        input_s.to(self.device), target_s.to(self.device)
+
+                    self.stu_optimizer.zero_grad()
+                    logits = self.p_stu_net(input_s)
+                    stu_logits = self.p_stu_net(input_t0)
+                    tch_logits = self.p_tch_net(input_t1)
+                    stu_probs = F.softmax(stu_logits, dim=1)
+                    tch_probs = F.softmax(tch_logits, dim=1)
+                    clf_probs =  F.softmax(logits, dim=1)
+
+                    clf_loss = self._get_loss(logits, target_s, getattr(self.stu_net, "logits_multi", None))
+                    aug_loss, num_masked, mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+                    if self.warmup:
+                        loss = clf_loss
+                    else:
+                        loss = clf_loss + self.cfg["ratio"]*aug_loss
+
+                    self.clf_loss += clf_loss
+                    self.aug_loss += aug_loss
+                    self.mean_conf += mean_conf
+                    self.num_masked += num_masked
+
+                    loss.backward()
+                    self.stu_optimizer.step()
+                    self.tch_optimizer.step()
+            
+                    train_loss += loss.item()
+                    _, predicted = clf_probs.max(1)
+                    total += target_s.size(0)
+                    correct += predicted.eq(target_s).sum().item()
+            
+                    if self.local_rank is not -1:
+                        if self.local_rank == 0:
+                            progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                        else:
+                            pass
+                    else:
+                        progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+
                 else:
-                    loss = self.clf_loss + self.cfg["ratio"]*self.aug_loss
-                loss.backward()
-                self.stu_optimizer.step()
-                self.tch_optimizer.step()
-        
-                train_loss += loss.item()
-                _, predicted = stu_probs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-        
-                if self.local_rank is not -1:
-                    if self.local_rank == 0:
-                        progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                 .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-                else:
-                    progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                 .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-            self.log("Train: loss: {:.3f} | acc: {:.3f} %"
-                             .format(train_loss/len(self.trainloader), 100.*correct/total))
+                    break
+                
+            self.log("Train: loss: {:.3f} | clf_loss: {:.3f} | aug_loss {:.3f} | meanconf {:.3f} | acc: {:.3f} %"
+                                .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, correct, total))
             self.test()
+
 
     def test(self, save=True):
         self.stu_net.eval()
@@ -301,7 +330,7 @@ class DATrainer(Trainer):
         correct = 0
         total = 0
         with torch.no_grad():
-            for batch_idx, (inputs, targets) in enumerate(self.testloader.datasets[0]):
+            for batch_idx, (inputs, targets) in enumerate(self.testloader.datasets[1]):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 outputs = self.p_tch_net(inputs)
                 loss = self.criterion(outputs, targets)

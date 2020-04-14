@@ -132,6 +132,26 @@ def main(argv):
                 cfg=cfg
             )
     elif cfg["trainer_type"] == "da":
+        d_da = {
+            # Digits
+            "s": "svhn",
+            "m": "mnist",
+            "syn": "synth",
+            "synth-sl": "synth-small",
+            "u": "usps",
+            # Office 31
+            "d": "dslr",
+            "w": "webcam",
+            "p": "pascal",
+            # Caltech
+            "c": "Caltech",
+            # imgnet
+            "i": "imagenet"
+        }
+
+        cfg["trainer"]["source"] = d_da[cfg["trainer"]["source"]]
+        cfg["trainer"]["target"] = d_da[cfg["trainer"]["target"]]
+
         if cfg["trainer"]["dataset"] == "digits":
             trainloader, testloader = datasets.da_digits(
                 domains = [cfg["trainer"]["source"],cfg["trainer"]["target"]],
