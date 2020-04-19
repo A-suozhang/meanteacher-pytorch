@@ -2,8 +2,8 @@ trainer_type: "da"
 trainer: 
     epochs: 20
     dataset: "digits"
-    source: "syn"
-    target: "s"
+    source: "s"
+    target: "m"
     label_batch_size: 128
     train_batch_size: 256
     test_batch_size: 256

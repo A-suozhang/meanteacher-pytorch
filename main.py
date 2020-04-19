@@ -30,6 +30,7 @@ from models import *
 from trainer import *
 # import trainer
 from utils import *
+from fix_utils import *
 
 def main(argv):
 
@@ -167,11 +168,20 @@ def main(argv):
     logging.info("==> Building model..")
 
     ## ------- Net --------------
+    ## -----(Fix Cfg Here)-------
     net_type = cfg["trainer"]["model"]
     if net_type == "vgg":
         net = vgg.VGG("VGG16")
     elif net_type == "convnet":
-        net = convnet.MyNet()
+        if cfg["trainer"]["fix"] is not None:
+            import ipdb; ipdb.set_trace()
+            net = MyNet_fix(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()))
+        else:
+            net = convnet.MyNet()
+
+    ## ---- Setting the Fix-Mode -------
+    if cfg["trainer"]["fix"] is not None:
+        set_fix_mode(net,"train",cfg["trainer"])
 
     # Copy a piece of net for semi training & DA
     if cfg["trainer_type"]=="semi" or cfg["trainer_type"]=="da":
@@ -187,7 +197,6 @@ def main(argv):
                     p_net_ = torch.nn.DataParallel(net_, gpus)
                 else:
                     p_net_ = net_
-
 
     net = net.to(device)
     if device == "cuda":
@@ -228,7 +237,6 @@ def main(argv):
                                                     save_every=args.save_every, 
                                                      log=logging.info,
                                                      cfg=cfg["trainer"])
-            
 
 
     trainer_.init(device=device, local_rank=args.local_rank,resume=args.resume, pretrain=args.pretrain)

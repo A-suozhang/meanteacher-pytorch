@@ -17,6 +17,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 from utils import progress_bar
+from fix_utils import *
 
 def _getattr(obj, n):
     if isinstance(obj, torch.nn.DataParallel):
@@ -29,8 +30,6 @@ def _setattr(obj, n, v):
         return setattr(obj.module, n, v)
     else:
         return setattr(obj, n, v)
-
-
 
 class Trainer(object):
     NAME = "normal"
@@ -170,6 +169,9 @@ class Trainer(object):
         return loss
 
     def train(self):
+        if self.cfg["fix"] is not None:
+            set_fix_mode(self.net,"train",self.cfg) 
+            set_fix_mode(self.p_net,"train",self.cfg) 
         for epoch in range(self.start_epoch, self.cfg["epochs"] + 1):
             self.epoch = epoch
             self.schedule_lr()
@@ -206,6 +208,9 @@ class Trainer(object):
 
     def test(self, save=True):
         self.net.eval()
+        if self.cfg["fix"] is not None:
+            set_fix_mode(self.net,"test",self.cfg)
+            set_fix_mode(self.p_net,"test",self.cfg)
         test_loss = 0
         correct = 0
         total = 0

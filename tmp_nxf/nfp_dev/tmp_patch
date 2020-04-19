@@ -1,0 +1,21 @@
+diff --git a/nics_fix_pt/VERSION b/nics_fix_pt/VERSION
+index 0d91a54..9e11b32 100644
+--- a/nics_fix_pt/VERSION
++++ b/nics_fix_pt/VERSION
+@@ -1 +1 @@
+-0.3.0
++0.3.1
+diff --git a/nics_fix_pt/fix_modules.py b/nics_fix_pt/fix_modules.py
+index 5068abb..ff7d89a 100644
+--- a/nics_fix_pt/fix_modules.py
++++ b/nics_fix_pt/fix_modules.py
+@@ -50,7 +50,8 @@ def get_fix_forward(cur_cls):
+             # which means it might fail to update the running mean/var
+             # if the updating momentum is too small
+             updated_buffer = getattr(self, n)
+-            self._buffers[n].copy_(updated_buffer)
++            if updated_buffer is not self._buffers[n]:
++                self._buffers[n].copy_(updated_buffer)
+         return res
+     return fix_forward
+ 
