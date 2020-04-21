@@ -13,7 +13,7 @@ trainer:
   lr_schedule:
     start: 0.05
     boundaries: [20,40]
-    rate: 0.05
+    rate: 0.1
   fix:
     bitwidth:
       w: 8
@@ -21,4 +21,6 @@ trainer:
       g: 16
     fix_bn: False
     fix_running: False
+  save: True
+  save_epochs: [1,2]
 

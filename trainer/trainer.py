@@ -44,7 +44,9 @@ class Trainer(object):
             "start": 0.1,
             "boundaries": [125, 200],
             "rate": 0.1
-        }
+        },
+        "save": False,
+        "save_epochs": []
     }
     def __init__(self, net, p_net, trainloader, testloader, savepath, save_every, log, cfg):
         self.net = net
@@ -68,6 +70,7 @@ class Trainer(object):
         self.start_epoch = 1
 
         self.multi_head_weight = self.cfg.get("multi_head_weight", None)
+        self.save_dict = {}
 
     def init(self, device, local_rank=-1,resume=None, pretrain=False):
         self.device = device
@@ -172,6 +175,12 @@ class Trainer(object):
         if self.cfg["fix"] is not None:
             set_fix_mode(self.net,"train",self.cfg) 
             set_fix_mode(self.p_net,"train",self.cfg) 
+        # Save results for plot
+        if self.cfg["save"]:
+            self.activation_map = []
+            self.grad_a_map = []
+            self.grad_w_map = []
+
         for epoch in range(self.start_epoch, self.cfg["epochs"] + 1):
             self.epoch = epoch
             self.schedule_lr()
@@ -181,20 +190,43 @@ class Trainer(object):
             train_loss = 0
             correct = 0
             total = 0
+            hook_times = 0
             for batch_idx, (inputs, targets) in enumerate(self.trainloader):
+                if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                    hook_times+=1
+                    self.set_hook()
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 self.optimizer.zero_grad()
                 outputs = self.p_net(inputs)
                 loss = self._get_loss(outputs, targets, getattr(self.net, "logits_multi", None))
-                # loss = self.criterion(outputs, targets)
+                # Acquiring the middle result and save
                 loss.backward()
                 self.optimizer.step()
+                # Move temp hook result to save_dict and clear hook buffer
+                if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                    self.set_hook(remove=True)
+                    # Re-initialize Buffer
+                    key_list = ["activation", "grad_w", "grad_a"]
+                    buffer_list = [self.activation_map, self.grad_w_map, self.grad_a_map]
+                    for key, buffer in zip(key_list, buffer_list):
+                        if key not in self.save_dict.keys():
+                            self.save_dict[key] = {}
+                        else:
+                            if str(self.epoch) not in self.save_dict[key].keys():
+                                self.save_dict[key][str(self.epoch)] = [buf.cpu() for buf in buffer]
+                            else:
+                                for i in range(len(self.save_dict[key][str(self.epoch)])):
+                                    self.save_dict[key][str(self.epoch)][i] =  self.save_dict[key][str(self.epoch)][i] + buffer[i].cpu()
+                        buffer = []
+                    
+                if batch_idx%10 == 0:
+                    self.save_for_plot("loss",loss.item())
         
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
-        
+
                 if self.local_rank is not -1:
                     if self.local_rank == 0:
                         progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
@@ -202,15 +234,30 @@ class Trainer(object):
                 else:
                     progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
                                  .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-            self.log("Train: loss: {:.3f} | acc: {:.3f} %"
-                             .format(train_loss/len(self.trainloader), 100.*correct/total))
+            self.log("Train: Epoch {} | loss: {:.3f} | acc: {:.3f} %"
+                             .format(self.epoch, train_loss/len(self.trainloader), 100.*correct/total))
+            if self.cfg["fix"] is not None:
+                self.test(fix=True)
             self.test()
 
-    def test(self, save=True):
+            if self.cfg["save"]:
+                # Divise the hook times to acquire mean
+                if str(self.epoch) in self.cfg["save_epochs"]:
+                    for s in ["activation","grad_a","grad_w"]:
+                        for i in range(len(self.save_dict[s])):
+                            self.save_dict[s][str(self.epoch)][i] = self.save_dict[s][str(self.epoch)][i]/hook_times
+            torch.save(self.save_dict, os.path.join(self.savepath,"plot.t7"))
+
+    def test(self, save=True, fix=False):
         self.net.eval()
-        if self.cfg["fix"] is not None:
+        # Only Apply fix-test when input param fix is true
+        if fix:
             set_fix_mode(self.net,"test",self.cfg)
             set_fix_mode(self.p_net,"test",self.cfg)
+        else:
+            set_fix_mode(self.net,"none",self.cfg)
+            set_fix_mode(self.p_net,"none",self.cfg)
+
         test_loss = 0
         correct = 0
         total = 0
@@ -239,11 +286,22 @@ class Trainer(object):
                                     test_loss/(batch_idx+1),
                                     100. * correct/total, correct, total), ban="Test")
         acc = 100.*correct/total
-        self.log("Test: loss: {:.3f} | acc: {:.3f} %"
-                 .format(test_loss/len(self.testloader), 100.*correct/total))
+        if fix:
+            self.log("Fix-Test: At Epoch {} |loss: {:.3f} | acc: {:.3f} %"
+                     .format(self.epoch, test_loss/len(self.testloader), 100.*correct/total))
+        else:
+            self.log("Test: At Epoch {} |loss: {:.3f} | acc: {:.3f} %"
+                     .format(self.epoch, test_loss/len(self.testloader), 100.*correct/total))
         if save:
-            self.save_if_best(acc)
-            self.save_every_epoch(acc)
+            # When training related to fix-point, only save the fixed-point model
+            if self.cfg["fix"] is not None:
+                if fix:
+                    self.save_if_best(acc)
+                    self.save_every_epoch(acc) 
+            # For regular training, just save
+            else:
+                self.save_if_best(acc)
+                self.save_every_epoch(acc)
         return acc
 
     def save_every_epoch(self, acc):
@@ -251,6 +309,11 @@ class Trainer(object):
             if not self.epoch % self.save_every:
                 self.log("Saving... acc{} (epoch {})".format(acc, self.epoch))
                 self.save(os.path.join(self.savepath, "ckpt_{}.t7".format(self.epoch)), acc, self.epoch)
+
+    def save_for_plot(self, name, data):
+        if not name in self.save_dict:
+            self.save_dict[name] = []
+        self.save_dict[name].append(data)
 
     def save(self, path, acc, epoch):
         state = {
@@ -267,7 +330,6 @@ class Trainer(object):
             self.best_acc = acc
         return is_best
 
-    
     def save_if_best(self, acc):
         if self._is_new_best(acc):
             if self.savepath is not None:
@@ -279,5 +341,59 @@ class Trainer(object):
                     "epoch": self.epoch,
                 }
                 torch.save(state, os.path.join(self.savepath, "ckpt.t7"))
+
+    def hook_fn(self, mod, inputs, outputs):
+        # keep the intermediate activation
+        self.activation_map.append(outputs)
+
+    def hook_fn_back(self, mod, inputs, outputs):
+        # keep the grad for w/a
+        self.grad_a_map.append(inputs[0])
+        self.grad_w_map.append(inputs[1])
+        try:
+            # print(inputs[0].shape)
+            pass
+        except AttributeError:
+            import ipdb; ipdb.set_trace()
+
+        # print("------- Module --------")
+        # print(mod)
+
+        # print("------ Input Grad ------")
+        # for grad in inputs:
+        #     try:
+        #         print(grad.shape)
+        #     except AttributeError:
+        #         print("None for this grad")
+
+        # print("------ Output Grad ------")
+        # for grad in outputs:
+        #     try:
+        #         print(grad.shape)
+        #     except AttributeError:
+        #         print("None for this grad")
+
+        # import ipdb; ipdb.set_trace()
+
+    def set_hook(self,remove=False):
+        '''
+        Set up the hook to acquire middle result's grad
+        '''
+        # self.net.conv1_3.register_backward_hook(self.hook_fn)
+        # self.net.conv1_3.register_forward_hook(self.hook_fn)
+        if not remove:
+            self.hooks = []
+            for name, mod in self.net._modules.items():
+                # the first conv's grad_a is None, could bring trouble leave it
+                if "conv" in name or "nin" in name:
+                    if "_3" in name:
+                        self.hooks.append(mod.register_backward_hook(self.hook_fn_back))
+                        self.hooks.append(mod.register_forward_hook(self.hook_fn))
+        else:
+            for h in self.hooks:
+                h.remove()
+
+                
+ 
 
 

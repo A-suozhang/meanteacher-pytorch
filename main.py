@@ -174,7 +174,6 @@ def main(argv):
         net = vgg.VGG("VGG16")
     elif net_type == "convnet":
         if cfg["trainer"]["fix"] is not None:
-            import ipdb; ipdb.set_trace()
             net = MyNet_fix(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()))
         else:
             net = convnet.MyNet()

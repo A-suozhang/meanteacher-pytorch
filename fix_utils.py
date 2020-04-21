@@ -195,4 +195,4 @@ def set_fix_mode(net,mode, cfg):
         net.set_fix_method(nfp.FIX_NONE)
     else:
         raise Exception("Not Implemented Mode")
-    print("--- Setting the Fix Mode as: {} ---".format(mode))
+    # print("--- Setting the Fix Mode as: {} ---".format(mode))
