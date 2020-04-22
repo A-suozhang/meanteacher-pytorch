@@ -20,9 +20,10 @@ def _generate_default_fix_cfg(names, scale=0, bitwidth=8, method=0):
             "bitwidth": torch.autograd.Variable(
                 torch.IntTensor(np.array([bitwidth])), requires_grad=False
             ),
-            # "range_method": nfp.RangeMethod.RANGE_MAX_TENPERCENT
+            # "range_method": nfp.RangeMethod.RANGE_MAX_TENPERCENT,
             # "range_method": nfp.RangeMethod.RANGE_SWEEP
-            "range_method": nfp.RangeMethod.RANGE_MAX
+            "range_method": nfp.RangeMethod.RANGE_MAX,
+            "stochastic": True,
         }
         for n in names
     }

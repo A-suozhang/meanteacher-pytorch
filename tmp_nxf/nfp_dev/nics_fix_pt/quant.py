@@ -13,18 +13,31 @@ from nics_fix_pt.consts import QuantizeMethod, RangeMethod
 __all__ = ["quantitize"]
 
 
-def _do_quantitize(data, scale, bit_width):
+def _do_quantitize(data, scale, bit_width, symmetric=True, stochastic=False):
     scale_f = scale.to(data.device).float()
     bit_width = bit_width.to(data.device)
     tensor_2 = torch.autograd.Variable(torch.FloatTensor([2.0]),
                                        requires_grad=False).to(data.device)
-    step = torch.pow(
-        tensor_2, (scale_f - (bit_width - 1).float())
-    )
+    if symmetric:
+        dynamic_range=2*float(scale)
+        maximum = float(scale)
+        minimum = -maximum
+    else:
+        # TODO: consider how to feed in range for insymmetric
+        pass
+    step = torch.tensor(dynamic_range/float(2.**(bit_width)))
+    # step = torch.pow(
+    #     tensor_2, (scale_f - (bit_width - 1).float())
+    # )
     step = step.to(data.device)
 
-    minimum = -float(2. ** (scale.cpu().data.numpy()))
-    maximum = -minimum
+    if stochastic:
+        output = torch.clamp(StraightThroughStochasticRound.apply(data / step)*step, minimum, maximum)
+    else:
+        output = torch.clamp(StraightThroughRound.apply(data / step)*step, minimum, maximum)
+    # Symmetric Rounding
+    # minimum = -float(2. ** (scale.cpu().data.numpy()))
+    # maximum = -minimum
     # maximum = -minimum - step
     # TODO: Even if the quantitize cfg is "auto", some overflow may occur,
     #       and maybe cause some problems.
@@ -35,12 +48,12 @@ def _do_quantitize(data, scale, bit_width):
     #   small discrepancy between software simulation and actual hardware deployment.
     # * Modify the `new_scale` calculation.
     return (
-        torch.clamp(StraightThroughRound.apply(data / step)*step, minimum, maximum),
+        output,
         step,
     )
 
 
-def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX):
+def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False):
     if (
         not isinstance(method, torch.autograd.Variable)
         and not torch.is_tensor(method)
@@ -56,45 +69,57 @@ def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE
         EPS = 1e-5
         range_method_v = get_int(range_method)
         if range_method_v == RangeMethod.RANGE_MAX:
-            new_scale = torch.ceil(
+            new_scale = torch.pow(2,torch.ceil(
                 torch.log(
                     torch.max(
                         torch.max(torch.abs(data)),
-                        torch.tensor(EPS).float().to(data.device),
+                        # torch.tensor(EPS).float().to(data.device),
+                        torch.cuda.FloatTensor([1]).fill_(EPS)
                     )
-                )
-                / np.log(2.0)
+                )/torch.cuda.FloatTensor([1]).fill_(np.log(2.)))
             )
+            scale.data = new_scale.data
+            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
+
         elif range_method_v == RangeMethod.RANGE_MAX_TENPERCENT:
             # FIXME: Too slow
-            new_scale = torch.ceil(
+            scale = torch.pow(2,torch.ceil(
                 torch.log(
                     torch.max(
                         # torch.kthvalue(torch.abs(data.view(-1)), 9 * (data.nelement() // 10))[0],
                         torch.topk(torch.abs(data.view(-1)), data.nelement() // 10)[0][-1],
-                        torch.tensor(EPS).float().to(data.device))
-                ) / np.log(2.0)
-            )
+                        # torch.tensor(EPS).float().to(data.device))
+                        torch.cuda.FloatTensor(1).fill_(EPS))
+                ) / torch.cuda.FloatTensor([1]).fill_(np.log(2.0))
+            ))
+            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
+
         elif range_method_v == RangeMethod.RANGE_3SIGMA:
-            # raise NotImplementedError()
+            new_scale = torch.ceil(torch.log(new_boundary))
             new_boundary = torch.max(3*torch.std(data)+torch.abs(torch.mean(data)), torch.tensor(EPS).float().to(data.device),)
-            new_scale = torch.ceil(torch.log(new_boundary) / np.log(2.0))
+            new_scale = torch.pow(2,torch.ceil(torch.log(new_boundary) / np.log(2.0)))
+            scale = new_scale
+            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
 
         elif range_method_v == RangeMethod.RANGE_SWEEP:
+            # Iterat through other scale to find the proper scale to minimize error 
+            # Noted that the scale is [(MAX - SWEEP),MAX]
             SWEEP = 3
             temp_scale = torch.ceil(torch.log(torch.max(
                 torch.max(abs(data)),
                 torch.tensor(EPS).float().to(data.device))) / np.log(2.0))
-            errors = torch.zeros(SWEEP).float().to(data.device)
             for i in range(SWEEP):
                 errors[i] = torch.abs(_do_quantitize(data, temp_scale-i, bitwidth)[0] - data).sum()
-            new_scale = temp_scale - errors.argmin()
+            new_scale = torch.pow(2,temp_scale - errors.argmin())
+            scale.data = new_scale
+            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
+
         else:
             raise NotImplementedError()
-        scale.data[0] = new_scale
-        return _do_quantitize(data, scale, bitwidth)
+
     elif method_v == QuantizeMethod.FIX_FIXED:
         return _do_quantitize(data, scale, bitwidth)
+
     raise Exception("Quantitize method not legal: {}".format(method_v))
 
 
@@ -108,19 +133,31 @@ class StraightThroughRound(torch.autograd.Function):
     def backward(ctx, g):
         return g
 
+class StraightThroughStochasticRound(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        # The Binary tensor denoting whether ceil or not, closer to ceil means for probabily choose ceil
+        # return x.floor() + (torch.rand(x.shape).to(x.device) > x.ceil() - x)*torch.ones(x.shape).to(x.device)
+        return x.floor() + (torch.cuda.FloatTensor(x.shape).uniform_() > x.ceil() - x)*torch.cuda.FloatTensor(x.shape).fill_(1.)
+
+    @staticmethod
+    def backward(ctx, g):
+        return g
+
+
 
 class QuantitizeGradient(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX):
+    def forward(ctx, x, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False):
         # FIXME: save the tensor/variables for backward,
         #        maybe should use `ctx.save_for_backward` for standard practice
         # but `save_for_backward` requires scale/bitwidth/method all being of type `Variable`...
-        ctx.saved = (scale, bitwidth, method, range_method)
+        ctx.saved = (scale, bitwidth, method, range_method, stochastic)
         return x
 
     @staticmethod
     def backward(ctx, g):
-        return quantitize_cfg(g, *ctx.saved)[0], None, None, None, None
+        return quantitize_cfg(g, *ctx.saved)[0], None, None, None, None, None
 
 
 def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
@@ -146,6 +183,7 @@ def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
             data_cfg["bitwidth"],
             data_cfg["method"],
             data_cfg.get("range_method", RangeMethod.RANGE_MAX),
+            data_cfg.get("stochastic", False),
         )
 
     # quantitize gradient
@@ -161,6 +199,7 @@ def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
             grad_cfg["bitwidth"],
             grad_cfg["method"],
             grad_cfg.get("range_method", RangeMethod.RANGE_MAX),
+            grad_cfg.get("stochastic", False),
         )
 
     out_param.data_cfg = data_cfg
