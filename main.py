@@ -30,7 +30,6 @@ from models import *
 from trainer import *
 # import trainer
 from utils import *
-from fix_utils import *
 
 def main(argv):
 
@@ -103,6 +102,43 @@ def main(argv):
     else:
         logging.info("\033[1;3mWARNING: Using CPU!\033[0m")
 
+
+    # For Fix cfg
+    if cfg["trainer"]["fix"] is not None:
+
+        # Regenerate the default generation cfg
+        import nics_fix_pt as nfp
+        import nics_fix_pt.nn_fix as nnf
+        import numpy as np
+
+        def _generate_default_fix_cfg(names, scale=0, bitwidth=8, method=0):
+            return {
+                n: {
+                    "method": torch.autograd.Variable(
+                        torch.IntTensor(np.array([method])), requires_grad=False
+                    ),
+                    "scale": torch.autograd.Variable(
+                        torch.IntTensor(np.array([scale])), requires_grad=False
+                    ),
+                    "bitwidth": torch.autograd.Variable(
+                        torch.IntTensor(np.array([bitwidth])), requires_grad=False
+                    ),
+                    # "range_method": nfp.RangeMethod.RANGE_MAX_TENPERCENT,
+                    # "range_method": nfp.RangeMethod.RANGE_SWEEP
+                    "range_method": nfp.RangeMethod.RANGE_MAX,
+                    "stochastic": cfg["trainer"]["fix"]["stochastic"],
+                    "float_scale": cfg["trainer"]["fix"]["float_scale"],
+                    "zero_point": cfg["trainer"]["fix"]["zero_point"],
+                }
+                for n in names
+            }
+
+        # Fix-Net are defined in the fix_utlis.py, it has dependency of _generate_default_fix_cfg
+        # so make sure import it after defining the function based-on the config
+        import fix_utils
+        from fix_utils import set_fix_mode
+
+
 # ----------------------  Dataset -------------------------
 
     logging.info("==> Preparing data..")
@@ -174,7 +210,7 @@ def main(argv):
         net = vgg.VGG("VGG16")
     elif net_type == "convnet":
         if cfg["trainer"]["fix"] is not None:
-            net = MyNet_fix(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()))
+            net = fix_utils.MyNet_fix(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()),default_f=_generate_default_fix_cfg)
         else:
             net = convnet.MyNet()
 

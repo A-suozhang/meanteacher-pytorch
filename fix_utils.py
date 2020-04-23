@@ -8,26 +8,38 @@ import nics_fix_pt as nfp
 import nics_fix_pt.nn_fix as nnf
 import numpy as np
 
-def _generate_default_fix_cfg(names, scale=0, bitwidth=8, method=0):
-    return {
-        n: {
-            "method": torch.autograd.Variable(
-                torch.IntTensor(np.array([method])), requires_grad=False
-            ),
-            "scale": torch.autograd.Variable(
-                torch.IntTensor(np.array([scale])), requires_grad=False
-            ),
-            "bitwidth": torch.autograd.Variable(
-                torch.IntTensor(np.array([bitwidth])), requires_grad=False
-            ),
-            # "range_method": nfp.RangeMethod.RANGE_MAX_TENPERCENT,
-            # "range_method": nfp.RangeMethod.RANGE_SWEEP
-            "range_method": nfp.RangeMethod.RANGE_MAX,
-            "stochastic": True,
-        }
-        for n in names
-    }
 
+'''
+the generate default cfg is re-implemented in the main.py
+based on the cfg, however, the fix-net's definition are based-on 
+this function, so keep it in mind that in main.py
+import fix_utils should be called after propoer definition of
+the function _generate_default_fix_cfg
+'''
+
+
+# def _generate_default_fix_cfg(names, scale=0, bitwidth=8, method=0):
+#     return {
+#         n: {
+#             "method": torch.autograd.Variable(
+#                 torch.IntTensor(np.array([method])), requires_grad=False
+#             ),
+#             "scale": torch.autograd.Variable(
+#                 torch.IntTensor(np.array([scale])), requires_grad=False
+#             ),
+#             "bitwidth": torch.autograd.Variable(
+#                 torch.IntTensor(np.array([bitwidth])), requires_grad=False
+#             ),
+#             # "range_method": nfp.RangeMethod.RANGE_MAX_TENPERCENT,
+#             # "range_method": nfp.RangeMethod.RANGE_SWEEP
+#             "range_method": nfp.RangeMethod.RANGE_MAX,
+#             "stochastic": True,
+#             "float_scale": True,
+#             "zero_point": True,
+#         }
+#         for n in names
+#     }
+# 
 
 from models.mymodules import *
 from nics_fix_pt import register_fix_module
@@ -36,8 +48,8 @@ import nics_fix_pt.nn_fix as nnf
 
 
 class MyNet_fix(nnf.FixTopModule):
-
-    def __init__(self, fix=True, fix_bn=True, bitwidths=[8,8,None]):
+    # the _generate_default_fix_cfg func was defined in main.py through cfg and feed into through decfault_f
+    def __init__(self, fix=True, fix_bn=True, bitwidths=[8,8,None], default_f=None):
         '''
         --- The Fixed net ---
         note that here we can only control whether quantize bn or not
@@ -49,6 +61,7 @@ class MyNet_fix(nnf.FixTopModule):
         print("fix bn: {}; Bitwidths: {}".format(fix_bn, bitwidths))
         fix_grad = bitwidths[2] is not -1
         # fix configurations (data/grad) for parameters/buffers
+        _generate_default_fix_cfg = default_f
         self.fix_param_cfgs = {}
         self.fix_grad_cfgs = {}
         layers = [("conv1_1", 128, 3), ("bn1_1",), ("conv1_2", 128, 3), ("bn1_2",),

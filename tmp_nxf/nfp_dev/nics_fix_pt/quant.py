@@ -14,17 +14,30 @@ __all__ = ["quantitize"]
 
 
 def _do_quantitize(data, scale, bit_width, symmetric=True, stochastic=False):
-    scale_f = scale.to(data.device).float()
+    '''
+    when sym is not true, the input scale will be 2-value tensor [min,max]
+    by defalutm the scale is a single fp-value, denoting range [-max, max]
+    '''
+    # scale_f = scale.to(data.device).float()
     bit_width = bit_width.to(data.device)
     tensor_2 = torch.autograd.Variable(torch.FloatTensor([2.0]),
                                        requires_grad=False).to(data.device)
     if symmetric:
+        assert len(scale) == 1
         dynamic_range=2*float(scale)
         maximum = float(scale)
         minimum = -maximum
     else:
-        # TODO: consider how to feed in range for insymmetric
-        pass
+        '''
+        actually in real hardware implmention, the asymmetric quantization
+        will be implemented through 1-fp scale and 1-int zero-point to 
+        constraint the range, here for simplicity of software simulation,
+        we simply define its range
+        '''
+        assert len(scale) == 2
+        dynamic_range = float(scale[1] - scale[0])
+        maximum = float(scale[1])
+        minimum = float(scale[0])
     step = torch.tensor(dynamic_range/float(2.**(bit_width)))
     # step = torch.pow(
     #     tensor_2, (scale_f - (bit_width - 1).float())
@@ -35,6 +48,7 @@ def _do_quantitize(data, scale, bit_width, symmetric=True, stochastic=False):
         output = torch.clamp(StraightThroughStochasticRound.apply(data / step)*step, minimum, maximum)
     else:
         output = torch.clamp(StraightThroughRound.apply(data / step)*step, minimum, maximum)
+
     # Symmetric Rounding
     # minimum = -float(2. ** (scale.cpu().data.numpy()))
     # maximum = -minimum
@@ -53,7 +67,13 @@ def _do_quantitize(data, scale, bit_width, symmetric=True, stochastic=False):
     )
 
 
-def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False):
+def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False, float_scale=True, zero_point=True):
+    '''
+    stochastic - stochastic rounding
+    range_method - how to decide dynamic range
+    float_scale - whether the scale is chosen to be 2^K
+    zero_point  - symm/asymm quantize
+    '''
     if (
         not isinstance(method, torch.autograd.Variable)
         and not torch.is_tensor(method)
@@ -69,17 +89,28 @@ def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE
         EPS = 1e-5
         range_method_v = get_int(range_method)
         if range_method_v == RangeMethod.RANGE_MAX:
-            new_scale = torch.pow(2,torch.ceil(
-                torch.log(
-                    torch.max(
-                        torch.max(torch.abs(data)),
-                        # torch.tensor(EPS).float().to(data.device),
-                        torch.cuda.FloatTensor([1]).fill_(EPS)
-                    )
-                )/torch.cuda.FloatTensor([1]).fill_(np.log(2.)))
-            )
-            scale.data = new_scale.data
-            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
+            if float_scale:
+                # Only support float scale with zero-point for now
+                if zero_point:
+                    new_scale = [data.min(), data.max()]
+                    scale.data = torch.FloatTensor(new_scale)
+                    return _do_quantitize(data, scale, bitwidth, stochastic=stochastic,symmetric=False)
+                else:
+                    new_scale = torch.max(torch.max(torch.abs(data)),torch.cuda.FloatTensor([1]).fill_(EPS))
+                    scale.data = new_scale
+                    return _do_quantitize(data, scale, bitwidth, stochastic=stochastic,symmetric=True)
+            else:
+                new_scale = torch.pow(2,torch.ceil(
+                    torch.log(
+                        torch.max(
+                            torch.max(torch.abs(data)),
+                            # torch.tensor(EPS).float().to(data.device),
+                            torch.cuda.FloatTensor([1]).fill_(EPS)
+                        )
+                    )/torch.cuda.FloatTensor([1]).fill_(np.log(2.)))
+                )
+                scale.data = new_scale
+                return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
 
         elif range_method_v == RangeMethod.RANGE_MAX_TENPERCENT:
             # FIXME: Too slow
@@ -99,7 +130,7 @@ def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE
             new_boundary = torch.max(3*torch.std(data)+torch.abs(torch.mean(data)), torch.tensor(EPS).float().to(data.device),)
             new_scale = torch.pow(2,torch.ceil(torch.log(new_boundary) / np.log(2.0)))
             scale = new_scale
-            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic)
+            return _do_quantitize(data, scale, bitwidth, stochastic=stochastic, symmetric=not zero_point)
 
         elif range_method_v == RangeMethod.RANGE_SWEEP:
             # Iterat through other scale to find the proper scale to minimize error 
@@ -118,7 +149,7 @@ def quantitize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE
             raise NotImplementedError()
 
     elif method_v == QuantizeMethod.FIX_FIXED:
-        return _do_quantitize(data, scale, bitwidth)
+        return _do_quantitize(data, scale, bitwidth,stochastic=stochastic, symmetric=not zero_point)
 
     raise Exception("Quantitize method not legal: {}".format(method_v))
 
@@ -148,16 +179,16 @@ class StraightThroughStochasticRound(torch.autograd.Function):
 
 class QuantitizeGradient(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False):
+    def forward(ctx, x, scale, bitwidth, method, range_method=RangeMethod.RANGE_MAX, stochastic=False, float_scale=False, zero_point=False):
         # FIXME: save the tensor/variables for backward,
         #        maybe should use `ctx.save_for_backward` for standard practice
         # but `save_for_backward` requires scale/bitwidth/method all being of type `Variable`...
-        ctx.saved = (scale, bitwidth, method, range_method, stochastic)
+        ctx.saved = (scale, bitwidth, method, range_method, stochastic, float_scale, zero_point)
         return x
 
     @staticmethod
     def backward(ctx, g):
-        return quantitize_cfg(g, *ctx.saved)[0], None, None, None, None, None
+        return quantitize_cfg(g, *ctx.saved)[0], None, None, None, None, None, None, None
 
 
 def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
@@ -184,6 +215,8 @@ def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
             data_cfg["method"],
             data_cfg.get("range_method", RangeMethod.RANGE_MAX),
             data_cfg.get("stochastic", False),
+            data_cfg.get("float_scale", False),
+            data_cfg.get("zero_point", False),
         )
 
     # quantitize gradient
@@ -200,7 +233,10 @@ def quantitize(param, fix_cfg={}, fix_grad_cfg={}, kwarg_cfg={}, name=""):
             grad_cfg["method"],
             grad_cfg.get("range_method", RangeMethod.RANGE_MAX),
             grad_cfg.get("stochastic", False),
+            grad_cfg.get("float_scale", False),
+            grad_cfg.get("zero_point", False),
         )
+
 
     out_param.data_cfg = data_cfg
     out_param.grad_cfg = grad_cfg
