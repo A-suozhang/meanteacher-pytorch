@@ -7,11 +7,11 @@ trainer:
   model: "convnet"
   optimizer_type: "SGD"
   optimizer: 
-    lr: 0.04
+    lr: 0.05
     momentum: 0.9
     weight_decay: 4.e-5
   lr_schedule:
-    start: 0.04
+    start: 0.05
     boundaries: [20,40]
     rate: 0.1
   fix:
@@ -23,8 +23,7 @@ trainer:
     fix_running: False
     stochastic: False
     float_scale: True
-    zero_point: True
-    group: "channel"
-  save: True
-  save_epochs: [10,20]
+    zero_point: False
+  save: False
+  save_epochs: [1,2]
 

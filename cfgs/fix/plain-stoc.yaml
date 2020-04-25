@@ -9,7 +9,7 @@ trainer:
   optimizer: 
     lr: 0.04
     momentum: 0.9
-    weight_decay: 4.e-5
+    weight_decay: 5.e-4
   lr_schedule:
     start: 0.04
     boundaries: [20,40]
@@ -21,10 +21,9 @@ trainer:
       g: 8
     fix_bn: False
     fix_running: False
-    stochastic: False
+    stochastic: True
     float_scale: True
     zero_point: True
-    group: "channel"
-  save: True
-  save_epochs: [10,20]
+  save: False
+  save_epochs: [1,2]
 

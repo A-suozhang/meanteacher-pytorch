@@ -43,7 +43,7 @@ def main(argv):
     parser.add_argument("--pretrain", action="store_true",
                         help="used with `--resume`, regard as a pretrain model, do not recover epoch/best_acc")
     parser.add_argument("--no-cuda", action="store_true", default=False, help="do not use gpu")
-    parser.add_argument("--seed", default=None, help="random seed", type=int)
+    parser.add_argument("--seed", default=2020, help="random seed", type=int)
     parser.add_argument("--save-every", default=20, type=int, help="save every N epoch")
     parser.add_argument("--distributed", action="store_true",help="whether to use distributed training")
     parser.add_argument("--dataset-path", default=None, help="dataset path")
@@ -61,12 +61,6 @@ def main(argv):
         gpus = [int(d) for d in args.gpu.split(",")]
         torch.cuda.set_device(gpus[0])
 
-    if args.seed is not None:
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        random.seed(args.seed)
 
     if not os.path.isdir(savepath):
         if sys.version_info.major == 2:
@@ -89,6 +83,22 @@ def main(argv):
     file_handler.setFormatter(logging.Formatter(log_format))
     logging.getLogger().addHandler(file_handler)
     logging.info("CMD: %s", " ".join(sys.argv))
+
+
+    if args.seed is not None:
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.enabled = True
+
+        import numpy as np
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        random.seed(args.seed)
+        logging.info("Setting Random Seed {}".format(args.seed))
+
 
     # Load and backup configuration file
     shutil.copyfile(args.cfg, os.path.join(savepath, "config.yaml"))
@@ -129,6 +139,7 @@ def main(argv):
                     "stochastic": cfg["trainer"]["fix"]["stochastic"],
                     "float_scale": cfg["trainer"]["fix"]["float_scale"],
                     "zero_point": cfg["trainer"]["fix"]["zero_point"],
+                    "group": cfg["trainer"]["fix"]["group"],
                 }
                 for n in names
             }
