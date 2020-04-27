@@ -44,7 +44,7 @@ def main(argv):
                         help="used with `--resume`, regard as a pretrain model, do not recover epoch/best_acc")
     parser.add_argument("--no-cuda", action="store_true", default=False, help="do not use gpu")
     parser.add_argument("--seed", default=2020, help="random seed", type=int)
-    parser.add_argument("--save-every", default=20, type=int, help="save every N epoch")
+    parser.add_argument("--save-every", default=50, type=int, help="save every N epoch")
     parser.add_argument("--distributed", action="store_true",help="whether to use distributed training")
     parser.add_argument("--dataset-path", default=None, help="dataset path")
     args = parser.parse_args(argv)

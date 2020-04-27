@@ -393,7 +393,5 @@ class Trainer(object):
             for h in self.hooks:
                 h.remove()
 
-                
- 
 
 

@@ -23,7 +23,6 @@ def _do_quantize(data, scale, bit_width, symmetric=True, stochastic=False, group
     if len(data.shape)<4:
         group = False
 
-        
     bit_width = bit_width.to(data.device)
     tensor_2 = torch.autograd.Variable(torch.FloatTensor([2.0]),
                                        requires_grad=False).to(data.device)
@@ -49,6 +48,7 @@ def _do_quantize(data, scale, bit_width, symmetric=True, stochastic=False, group
         maxs = maxs.reshape(-1,1,1,1).expand_as(data)
         mins = mins.reshape(-1,1,1,1).expand_as(data)
         data_to_devise = dynamic_range.reshape(-1,1,1,1)
+    # Maybe we should split activation/weight also the grad for this, however before the hardware design is settled, it's not sure whether to split
     elif group == "channel":
         maxs = maxs.reshape(1,-1,1,1).expand_as(data)
         mins = mins.reshape(1,-1,1,1).expand_as(data)
@@ -62,13 +62,17 @@ def _do_quantize(data, scale, bit_width, symmetric=True, stochastic=False, group
     if stochastic:
         output = StraightThroughStochasticRound.apply(data / step)*step
     else:
-        output = StraightThroughRound.apply(data / step)*step
+        try:
+            output = StraightThroughRound.apply(data / step)*step
+        except RuntimeError:
+            import ipdb; ipdb.set_trace()
 
     # Since torch.clamp dose not support clamp with multiple value, so here is an alternate
     if group is not False:
         output = torch.min(torch.max(mins,output), maxs)
     else:
         output = torch.clamp(output,float(mins),float(maxs))
+
 
 
 
@@ -119,8 +123,10 @@ def quantize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_M
 
     # Avoid extreme value
     EPS = torch.cuda.FloatTensor(max_data.shape).fill_(1e-5)
-    max_data = torch.max(max_data, EPS)
-    # min_data = torch.max(min_data, EPS) # FIXME: this could be useless since min_data could be pos/neg
+    if not zero_point:
+        # the abs() of min data may be bigger than max
+        max_data = torch.max(torch.max(max_data, min_data.abs()),EPS)
+        # min_data = torch.max(min_data, EPS) # FIXME: this could be useless since min_data could be pos/neg
 
     method_v = get_int(method)
     # EPS = torch.cuda.FloatTensor([1]).fill_(1e-5)
@@ -137,13 +143,13 @@ def quantize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_M
                     scale.data = new_scale
                     return _do_quantize(data, scale, bitwidth, stochastic=stochastic,symmetric=False, group=group)
                 else:
-                    new_scale = max_data
-                    scale.data = new_scale
+                    scale.data = max_data
                     return _do_quantize(data, scale, bitwidth, stochastic=stochastic,symmetric=True, group=group)
             else:
                 new_scale = torch.pow(2,torch.ceil(
                     torch.log(max_data)
-                    )/torch.cuda.FloatTensor([1]).fill_(np.log(2.)))
+                    /torch.cuda.FloatTensor([1]).fill_(np.log(2.))))
+
 
                 scale.data = new_scale
                 return _do_quantize(data, scale, bitwidth, stochastic=stochastic,group=group)
@@ -186,21 +192,39 @@ def quantize_cfg(data, scale, bitwidth, method, range_method=RangeMethod.RANGE_M
 
     elif method_v == QuantizeMethod.FIX_FIXED:
 
+        if group == "batch" and len(data.shape)==4:
+            # Only applied for conv units 
+            max_data = data.view(data.shape[0],-1).max(dim=1)[0]
+            min_data = data.view(data.shape[0],-1).min(dim=1)[0]
+        if group == "channel" and len(data.shape)==4:
+            max_data = data.view(data.shape[1],-1).max(dim=1)[0]
+            min_data = data.view(data.shape[1],-1).min(dim=1)[0]
+        else:
+            max_data = data.max()
+            min_data = data.min()
+
+        # Avoid extreme value
+        EPS = torch.cuda.FloatTensor(max_data.shape).fill_(1e-5)
+        if not zero_point:
+            # the abs() of min data may be bigger than max
+            max_data = torch.max(torch.max(max_data, min_data.abs()),EPS)
+            # min_data = torch.max(min_data, EPS) # FIXME: this could be useless since min_data could be pos/neg
+
         # TODO: Check whether float_scale automatically adjust through inference
         # If float_scale, do as FIX_AUTO does
+ 
         if float_scale:
             # Only support float scale with zero-point for now
             if zero_point:
-                new_scale = [data.min(), data.max()]
-                scale.data = torch.FloatTensor(new_scale)
+                new_scale = torch.stack([min_data, max_data])
+                scale.data = new_scale
                 return _do_quantize(data, scale, bitwidth, stochastic=stochastic,symmetric=False)
             else:
-                EPS = 1e-5
-                new_scale = torch.max(torch.max(torch.abs(data)),torch.cuda.FloatTensor([1]).fill_(EPS))
-                scale.data = new_scale
+                scale.data = max_data
                 return _do_quantize(data, scale, bitwidth, stochastic=stochastic,symmetric=True)
         else:
-            return _do_quantize(data, scale, bitwidth,stochastic=stochastic, symmetric=not zero_point)
+            # donot use new_scale when using power-of-2 scale
+            return _do_quantize(data, scale, bitwidth,stochastic=stochastic, symmetric=not zero_point, group=group)
 
     raise Exception("Quantitize method not legal: {}".format(method_v))
 
