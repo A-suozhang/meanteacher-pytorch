@@ -1,18 +1,18 @@
 trainer_type: "plain"
 trainer: 
-  epochs: 60
+  epochs: 200
   dataset: "cifar"
   train_batch_szie: 256
   test_batch_size: 256
   model: "convnet"
   optimizer_type: "SGD"
   optimizer: 
-    lr: 0.05
+    lr: 0.1
     momentum: 0.9
     weight_decay: 4.e-5
   lr_schedule:
-    start: 0.05
-    boundaries: [20,40]
+    start: 0.1
+    boundaries: [80,160]
     rate: 0.1
   fix:
     bitwidth:
@@ -22,9 +22,9 @@ trainer:
     fix_bn: False
     fix_running: False
     stochastic: True
-    float_scale: False
-    zero_point: False
+    float_scale: True
+    zero_point: True
     group: False
   save: True
-  save_epochs: [20,40]
+  save_epochs: [80,160]
 

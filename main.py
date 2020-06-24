@@ -114,7 +114,7 @@ def main(argv):
 
 
     # For Fix cfg
-    if cfg["trainer"]["fix"] is not None:
+    if cfg["trainer"].get("fix",None) is not None:
 
         # Regenerate the default generation cfg
         import nics_fix_pt as nfp
@@ -220,18 +220,22 @@ def main(argv):
     if net_type == "vgg":
         net = vgg.VGG("VGG16")
     elif net_type == "convnet":
-        if cfg["trainer"]["fix"] is not None:
+        if cfg["trainer"].get("fix",None) is not None:
             net = fix_utils.MyNet_fix(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()),default_f=_generate_default_fix_cfg)
         else:
             net = convnet.MyNet()
 
+
     ## ---- Setting the Fix-Mode -------
-    if cfg["trainer"]["fix"] is not None:
+    if cfg["trainer"].get("fix",None) is not None:
         set_fix_mode(net,"train",cfg["trainer"])
 
     # Copy a piece of net for semi training & DA
     if cfg["trainer_type"]=="semi" or cfg["trainer_type"]=="da":
-        net_ = type(net)()
+        if cfg["trainer"].get("fix",None) is not None:
+            net_ = type(net)(fix=True, fix_bn=cfg["trainer"]["fix"]["fix_bn"], bitwidths=list(cfg["trainer"]["fix"]["bitwidth"].values()),default_f=_generate_default_fix_cfg)
+        else:
+            net_ = type(net)()
         net_.load_state_dict(net.state_dict())
         net_ = net_.to(device)
         if device == "cuda":

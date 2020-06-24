@@ -1,0 +1,38 @@
+trainer_type: "semi"
+trainer: 
+    epochs: 30
+    dataset: "cifar"
+    numlabel: 4000
+    label_batch_size: 64
+    train_batch_size: 128
+    test_batch_size: 128
+    model: "convnet"
+    th: 0.8
+    ratio: 1
+    warmup_epochs: 0
+    teacher_alpha: 0.9921875
+    optimizer_type: "SGD"
+    stu_optimizer: 
+        lr: 0.05
+        momentum: 0.9
+        weight_decay: 5.e-4
+    lr_schedule:
+        start: 0.05
+        boundaries: [10,20]
+        rate: 0.1
+    fix:
+        bitwidth:
+          w: 8
+          a: 8
+          g: -1
+        fix_bn: False
+        fix_running: False
+        stochastic: True
+        float_scale: False
+        zero_point: False
+        group: False
+    save: True
+    save_epochs: [20,40]
+
+
+

@@ -20,6 +20,7 @@ import torchvision.transforms as transforms
 
 from utils import progress_bar
 from optim import EMAWeightOptimizer
+from fix_utils import *
 
 from .trainer import Trainer
 
@@ -55,6 +56,8 @@ class SemiTrainer(Trainer):
         "ratio": 3.0,
         "warmup_epochs": 0,
         "teacher_alpha": 0.9921875,
+        "save": False,
+        "save_epochs": [],
 
     }
     def __init__(self, tch_net,stu_net, p_tch_net,p_stu_net,  trainloader, testloader, savepath, save_every, log, cfg):
@@ -70,6 +73,7 @@ class SemiTrainer(Trainer):
         self.savepath = savepath
         self.save_every = save_every
         self.log = log
+        self.save_dict = {}
 
         self.cfg = copy.deepcopy(self.default_cfg)
         self.cfg.update(cfg)
@@ -220,6 +224,17 @@ class SemiTrainer(Trainer):
 
 
     def train(self):
+        if self.cfg.get("fix",None) is not None:
+            set_fix_mode(self.stu_net,"train",self.cfg) 
+            set_fix_mode(self.p_stu_net,"train",self.cfg) 
+            set_fix_mode(self.tch_net,"train",self.cfg) 
+            set_fix_mode(self.p_tch_net,"train",self.cfg) 
+        # Save results for plot
+        if self.cfg["save"]:
+            self.activation_map = []
+            self.grad_a_map = []
+            self.grad_w_map = []
+
         for epoch in range(self.start_epoch, self.cfg["epochs"] + 1):
             self.epoch = epoch
             if self.epoch < self.cfg["warmup_epochs"]:
@@ -236,9 +251,13 @@ class SemiTrainer(Trainer):
             train_loss = 0
             correct = 0
             total = 0
+            hook_times = 0
             # the CIFAR-10 Style DataLoader, Dirty, Maybe Fix Later
             if type(self.trainloader) == list:
                 for batch_idx, ((input_l, target_l),(input_u,target_u)) in enumerate(zip(self.trainloader[0],self.trainloader[1])):
+                    if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                        hook_times+=1
+                        self.set_hook()
                     targets = torch.cat([target_l,target_u])
                     input_s = torch.cat([input_l[0],input_l[0]])
                     input_t = torch.cat([input_l[1],input_u[1]])
@@ -249,8 +268,13 @@ class SemiTrainer(Trainer):
                     stu_probs = F.softmax(stu_logits, dim=1)
                     tch_probs = F.softmax(tch_logits, dim=1)
 
-                    self.clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
-                    self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+                    clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
+                    aug_loss, num_masked, mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+
+                    self.clf_loss += clf_loss
+                    self.aug_loss += aug_loss
+                    self.num_masked += num_masked
+                    self.mean_conf += mean_conf
                     if self.warmup:
                         loss = self.clf_loss
                     else:
@@ -258,7 +282,23 @@ class SemiTrainer(Trainer):
                     loss.backward()
                     self.stu_optimizer.step()
                     self.tch_optimizer.step()
-            
+                    if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                        self.set_hook(remove=True)
+                        # Re-initialize Buffer
+                        key_list = ["activation", "grad_w", "grad_a"]
+                        buffer_list = [self.activation_map, self.grad_w_map, self.grad_a_map]
+                        for key, buffer in zip(key_list, buffer_list):
+                            if key not in self.save_dict.keys():
+                                self.save_dict[key] = {}
+                            else:
+                                if str(self.epoch) not in self.save_dict[key].keys():
+                                    self.save_dict[key][str(self.epoch)] = [buf.cpu() for buf in buffer]
+                                else:
+                                    for i in range(len(self.save_dict[key][str(self.epoch)])):
+                                        self.save_dict[key][str(self.epoch)][i] =  self.save_dict[key][str(self.epoch)][i] + buffer[i].cpu()
+                            buffer = []
+     
+                
                     train_loss += loss.item()
                     _, predicted = stu_probs.max(1)
                     total += targets.size(0)
@@ -266,17 +306,34 @@ class SemiTrainer(Trainer):
             
                     if self.local_rank is not -1:
                         if self.local_rank == 0:
-                            progress_bar(batch_idx, len(self.trainloader[0]), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                            progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, int(correct), int(total)), ban="Train")
                     else:
-                        progress_bar(batch_idx, len(self.trainloader[0]), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                        progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                 .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, int(correct), int(total)), ban="Train")
+
                 self.log("Train: loss: {:.3f} | acc: {:.3f} %"
                                  .format(train_loss/len(self.trainloader), 100.*correct/total))
+                if self.cfg.get("fix",None) is not None:
+                    self.test(fix=True)
                 self.test()
+
+                if self.cfg["save"]:
+                # Divise the hook times to acquire mean
+                    if str(self.epoch) in self.cfg["save_epochs"]:
+                        for s in ["activation","grad_a","grad_w"]:
+                            for i in range(len(self.save_dict[s])):
+                                self.save_dict[s][str(self.epoch)][i] = self.save_dict[s][str(self.epoch)][i]/hook_times
+                torch.save(self.save_dict, os.path.join(self.savepath,"plot.t7"))
+
+
 
             else:
                 for batch_idx, ((input_s, input_t), targets) in enumerate(self.trainloader):
+                    if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                        hook_times+=1
+                        self.set_hook()
+     
                     input_s, input_t, targets = input_s.to(self.device), input_t.to(self.device), targets.to(self.device)
                     self.stu_optimizer.zero_grad()
                     stu_logits = self.p_stu_net(input_s)
@@ -284,16 +341,39 @@ class SemiTrainer(Trainer):
                     stu_probs = F.softmax(stu_logits, dim=1)
                     tch_probs = F.softmax(tch_logits, dim=1)
 
-                    self.clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
-                    self.aug_loss, self.num_masked, self.mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
+                    clf_loss = self._get_loss(stu_logits, targets, getattr(self.stu_net, "logits_multi", None))
+                    aug_loss, num_masked, mean_conf = self._get_aug_loss(stu_probs, tch_probs, self.cfg["th"], stu_logits, tch_logits)
                     if self.warmup:
-                        loss = self.clf_loss
+                        loss = clf_loss
                     else:
-                        loss = self.clf_loss + self.cfg["ratio"]*self.aug_loss
+                        loss = clf_loss + self.cfg["ratio"]*aug_loss
+                    self.clf_loss += clf_loss
+                    self.aug_loss += aug_loss
+                    self.num_masked += num_masked
+                    self.mean_conf += mean_conf
+
                     loss.backward()
                     self.stu_optimizer.step()
                     self.tch_optimizer.step()
-            
+    
+                    # Log the hook then remove
+                    if self.cfg["save"] and batch_idx % 100 == 1 and self.epoch in self.cfg["save_epochs"]:
+                        self.set_hook(remove=True)
+                        # Re-initialize Buffer
+                        key_list = ["activation", "grad_w", "grad_a"]
+                        buffer_list = [self.activation_map, self.grad_w_map, self.grad_a_map]
+                        for key, buffer in zip(key_list, buffer_list):
+                            if key not in self.save_dict.keys():
+                                self.save_dict[key] = {}
+                            else:
+                                if str(self.epoch) not in self.save_dict[key].keys():
+                                    self.save_dict[key][str(self.epoch)] = [buf.cpu() for buf in buffer]
+                                else:
+                                    for i in range(len(self.save_dict[key][str(self.epoch)])):
+                                        self.save_dict[key][str(self.epoch)][i] =  self.save_dict[key][str(self.epoch)][i] + buffer[i].cpu()
+                            buffer = []
+     
+
                     train_loss += loss.item()
                     _, predicted = stu_probs.max(1)
                     total += targets.size(0)
@@ -301,18 +381,44 @@ class SemiTrainer(Trainer):
             
                     if self.local_rank is not -1:
                         if self.local_rank == 0:
-                            progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
+                            progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                     .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, int(correct), int(total)), ban="Train")
                     else:
-                        progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
-                                     .format(train_loss/(batch_idx+1), 100.*correct/total, correct, total), ban="Train")
-                self.log("Train: loss: {:.3f} | acc: {:.3f} %"
-                                 .format(train_loss/len(self.trainloader), 100.*correct/total))
+                        progress_bar(batch_idx, len(self.trainloader), "Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"
+                                 .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, int(correct), int(total)), ban="Train")
+                self.log("Loss: {:.3f} | Clf Loss: {:.3f} | Aug Loss: {:.3f} | MeanConf: {:.3f} | Masked: {:.3f} | Acc: {:.3f} % ({:d}/{:d})"\
+                         .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), self.num_masked/(batch_idx+1), 100.*correct/total, int(correct), int(total)))
+
+                if self.cfg.get("fix",None) is not None:
+                    self.test(fix=True)
                 self.test()
 
-    def test(self, save=True):
+                if self.cfg["save"]:
+                # Divise the hook times to acquire mean
+                    if str(self.epoch) in self.cfg["save_epochs"]:
+                        for s in ["activation","grad_a","grad_w"]:
+                            for i in range(len(self.save_dict[s])):
+                                self.save_dict[s][str(self.epoch)][i] = self.save_dict[s][str(self.epoch)][i]/hook_times
+                torch.save(self.save_dict, os.path.join(self.savepath,"plot.t7"))
+
+
+
+    def test(self, save=True, fix=False):
         self.stu_net.eval()
         self.tch_net.eval()
+        if fix:
+            set_fix_mode(self.stu_net,"test",self.cfg)
+            set_fix_mode(self.p_stu_net,"test",self.cfg)
+            set_fix_mode(self.tch_net,"test",self.cfg)
+            set_fix_mode(self.p_tch_net,"test",self.cfg)
+        elif self.cfg.get("fix",None) is not None:
+            set_fix_mode(self.stu_net,"none",self.cfg)
+            set_fix_mode(self.p_stu_net,"none",self.cfg)
+            set_fix_mode(self.tch_net,"none",self.cfg)
+            set_fix_mode(self.p_tch_net,"none",self.cfg)
+        else:
+            pass
+
         test_loss = 0
         correct = 0
         total = 0
@@ -341,11 +447,22 @@ class SemiTrainer(Trainer):
                                     test_loss/(batch_idx+1),
                                     100. * correct/total, correct, total), ban="Test")
         acc = 100.*correct/total
-        self.log("Test: loss: {:.3f} | acc: {:.3f} %"
-                 .format(test_loss/len(self.testloader), 100.*correct/total))
+        if fix:
+            self.log("Fix-Test: At Epoch {} |loss: {:.3f} | acc: {:.3f} %"
+                     .format(self.epoch, test_loss/len(self.testloader), 100.*correct/total))
+        else:
+            self.log("Test: At Epoch {} |loss: {:.3f} | acc: {:.3f} %"
+                     .format(self.epoch, test_loss/len(self.testloader), 100.*correct/total))
+
         if save:
-            self.save_if_best(acc)
-            self.save_every_epoch(acc)
+            if self.cfg.get("fix",None) is not None:
+                if fix:
+                    self.save_if_best(acc)
+                    self.save_every_epoch(acc) 
+            # For regular training, just save
+            else:
+                self.save_if_best(acc)
+                self.save_every_epoch(acc)
         return acc
 
     def save_every_epoch(self, acc):

@@ -1,11 +1,15 @@
 trainer_type: "semi"
-trainer: 
-    epochs: 20
+trainer:
+    epochs: 60
     dataset: "cifar"
     numlabel: 4000
     label_batch_size: 128
     train_batch_size: 256
     test_batch_size: 256
+    # label_batch_size: 128
+    # train_batch_size: 256
+    # test_batch_size: 256
+
     model: "convnet"
     th: 0.75
     ratio: 0.3
@@ -18,8 +22,9 @@ trainer:
         weight_decay: 5.e-4
     lr_schedule:
         start: 0.1
-        boundaries: [5,10]
+        boundaries: [20,40]
         rate: 0.1
+    save: False
  
 
 

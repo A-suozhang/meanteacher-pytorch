@@ -318,8 +318,8 @@ class DATrainer(Trainer):
                 else:
                     break
                 
-            self.log("Train: loss: {:.3f} | clf_loss: {:.3f} | aug_loss {:.3f} | meanconf {:.3f} | acc: {:.3f} %"
-                                .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1), 100.*correct/total, correct, total))
+            self.log("Train: loss: {:.3f} | clf_loss: {:.3f} | aug_loss {:.3f} | meanconf {:.3f} | num_masked: {:.3f} | acc: {:.3f} %"
+                                .format(train_loss/(batch_idx+1), self.clf_loss/(batch_idx+1), self.aug_loss/(batch_idx+1), self.mean_conf/(batch_idx+1),self.num_masked/(batch_idx+1), 100.*correct/total, correct, total))
             self.test()
 
 
